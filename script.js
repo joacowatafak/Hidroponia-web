@@ -136,7 +136,6 @@ function connectToBroker() {
     cleanSession: true,
     keepAliveInterval: 30,
     timeout: 10,
-    path: '/mqtt',
     onSuccess: onConnectSuccess,
     onFailure: onConnectFailure
   };
