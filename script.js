@@ -13,8 +13,8 @@
   <script>
     // Tu código MQTT va aquí, DESPUÉS de cargar la librería
     const client = mqtt.connect('wss://af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud:8884/mqtt', {
-      username: 'TU_USUARIO',
-      password: 'TU_CONTRASEÑA'
+      username: 'hidroweb',
+      password: 'Frajoafed1377'
     });
 
     client.on('connect', function () {
