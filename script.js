@@ -1,9 +1,3 @@
-<head>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/mqttws31.min.js"></script>
-</head>
-
-
-
 const espIpInput = document.getElementById("espIp");
 
 function getBaseUrl() {
