@@ -1,3 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Mi App MQTT</title>
+
+  <!-- 👇 Añade esta línea aquí -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+</head>
+<body>
+
+  <script>
+    // Tu código MQTT va aquí, DESPUÉS de cargar la librería
+    const client = mqtt.connect('wss://af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud:8884/mqtt', {
+      username: 'TU_USUARIO',
+      password: 'TU_CONTRASEÑA'
+    });
+
+    client.on('connect', function () {
+      console.log('✅ Conectado al broker MQTT');
+    });
+
+    client.on('error', function (err) {
+      console.error('❌ Error:', err);
+    });
+  </script>
+
+</body>
+</html>
+
+
 const espIpInput = document.getElementById("espIp");
 
 function getBaseUrl() {
