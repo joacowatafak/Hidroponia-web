@@ -134,8 +134,8 @@ function connectToBroker() {
     password: settings.mqttPassword || undefined,
     useSSL: true,
     cleanSession: true,
-    keepAliveInterval: 30,
-    timeout: 10,
+    keepAliveInterval: 60,
+    timeout: 30,
     reconnect: true,
     onSuccess: onConnectSuccess,
     onFailure: onConnectFailure
