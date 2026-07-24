@@ -125,7 +125,7 @@ function connectToBroker() {
 
   mqttStatusEl.textContent = 'Conectando al broker...';
   const clientId = `hidro-web-${Math.floor(Math.random() * 100000)}`;
-  mqttClient = new window.Paho.Client(settings.mqttHost, Number(settings.mqttPort || 8884), clientId);
+  mqttClient = new window.Paho.Client(settings.mqttHost, Number(settings.mqttPort || 8884), "/mqtt", clientId);
   mqttClient.onConnectionLost = onConnectionLost;
   mqttClient.onMessageArrived = onMessageArrived;
 
