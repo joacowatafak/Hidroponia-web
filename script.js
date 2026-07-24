@@ -136,6 +136,7 @@ function connectToBroker() {
     cleanSession: true,
     keepAliveInterval: 30,
     timeout: 10,
+    reconnect: true,
     onSuccess: onConnectSuccess,
     onFailure: onConnectFailure
   };
