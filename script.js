@@ -50,6 +50,8 @@ const manualControlButtons = [luzOnBtn, luzOffBtn, bombaOnBtn, bombaOffBtn].filt
 const autoConfigActionButtons = [saveParamsBtn, clearParamsBtn].filter(Boolean);
 const MODE_SCHEDULE_SYNC_TOPIC = 'hidroponia/ui/mode-schedule';
 const ESP_CONFIG_TOPIC = 'hidroponia/config';
+const isGithubHosted = /github\.io$/i.test(window.location.hostname || '');
+const isHttpsPage = window.location.protocol === 'https:';
 
 let settings = {
   espIp: localStorage.getItem('espIp') || '',
@@ -346,21 +348,31 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
   }
 
   const serializedParams = params.toString();
+  let mqttDispatched = false;
 
   if (serializedParams && mqttConnected && mqttClient) {
     try {
       mqttClient.send(ESP_CONFIG_TOPIC, serializedParams);
-      if (connStatusEl) connStatusEl.textContent = 'ESP actualizado por MQTT';
+      mqttDispatched = true;
+      if (connStatusEl) connStatusEl.textContent = 'Config enviada por MQTT';
       return true;
     } catch (mqttErr) {
       console.warn('Fallo envio por MQTT, intento HTTP:', mqttErr);
     }
   }
 
+  if (isHttpsPage && !settings.espIp) {
+    if (connStatusEl) connStatusEl.textContent = 'En GitHub Pages usa MQTT o configura IP del ESP';
+    return false;
+  }
+
   const candidates = getConfigUrlCandidates();
   if (candidates.length === 0) {
-    if (connStatusEl) connStatusEl.textContent = 'Ingresa la IP del ESP8266';
-    return false;
+    if (!mqttDispatched) {
+      if (connStatusEl) connStatusEl.textContent = 'Ingresa la IP del ESP8266';
+      return false;
+    }
+    return true;
   }
 
   let lastError = null;
@@ -420,7 +432,7 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
 
   if (connStatusEl) connStatusEl.textContent = 'No se pudo enviar la configuración al ESP (revisa IP/red)';
   console.warn('Error enviando configuración al ESP:', lastError);
-  return false;
+  return mqttDispatched;
 }
 
 async function saveSettings(includeAutomationSettings = true) {
@@ -475,7 +487,7 @@ function baseUrl() {
   }
 
   const host = window.location.hostname;
-  if (host && host !== 'localhost' && host !== '127.0.0.1' && host !== '0.0.0.0') {
+  if (host && host !== 'localhost' && host !== '127.0.0.1' && host !== '0.0.0.0' && !isGithubHosted) {
     return `http://${host}`;
   }
 
@@ -486,12 +498,12 @@ function getTimeUrlCandidates() {
   const candidates = [];
   const currentOrigin = window.location.origin;
 
-  if (currentOrigin && currentOrigin !== 'null') {
+  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
     candidates.push(`${currentOrigin}/time`);
   }
 
   const currentHost = window.location.hostname;
-  if (currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1') {
+  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1') {
     candidates.push(`http://${currentHost}/time`);
   }
 
@@ -526,12 +538,12 @@ function getConfigUrlCandidates() {
   }
 
   const currentOrigin = window.location.origin;
-  if (currentOrigin && currentOrigin !== 'null') {
+  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
     candidates.push(`${currentOrigin}/config`);
   }
 
   const currentHost = window.location.hostname;
-  if (currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
+  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
     candidates.push(`http://${currentHost}/config`);
   }
 

@@ -206,6 +206,12 @@ input, select {
     width: 100%;
 }
 
+.mode-control-title {
+    display: block;
+    margin-bottom: 6px;
+    font-weight: bold;
+}
+
 .mode-toggle-row {
     display: flex;
     gap: 10px;
