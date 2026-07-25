@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+<script src="paho-mqtt.min.js"></script>
+
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HydroControl</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="container">
+        <div class="page-header hero-header">
+            <div class="hero-title">
+                <div class="hero-badge">🌿💧</div>
+                <h1>HIDROWEB</h1>
+                <p class="hero-subtitle">Control inteligente de tu hidroponía</p>
+            </div>
+            <a href="configuracion.html" class="header-link" title="Abrir configuraciones">⚙️</a>
+        </div>
+
+        <div class="section-block">
+            <div class="card">
+                <h2>📊 Estado actual</h2>
+                <div class="summary-row">
+                    <div class="status-item compact-summary">
+                        <h3>🕒 Hora</h3>
+                        <p id="serverTime">--:--</p>
+                    </div>
+                    <div class="status-item compact-summary">
+                        <h3>🌡️ Temp</h3>
+                        <p id="temp">24.5°C</p>
+                    </div>
+                    <div class="status-item compact-summary">
+                        <h3>💧 Hum</h3>
+                        <p id="hum">68%</p>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="status-item">
+                        <h3>💡 Luces</h3>
+                        <p id="estadoLuz">OFF</p>
+                        <button id="luzOn">Encender</button>
+                        <button id="luzOff">Apagar</button>
+                    </div>
+                    <div class="status-item">
+                        <h3>💧 Bomba</h3>
+                        <p id="estadoBomba">OFF</p>
+                        <button id="bombaOn">Encender</button>
+                        <button id="bombaOff">Apagar</button>
+                    </div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>⚙️ Modo y horarios</h2>
+                <label>Modo automático: <input type="checkbox" id="modoAuto"></label>
+                <div class="row">
+                    <label>Estación:
+                        <select id="epocaSelect">
+                            <option value="primavera">Primavera</option>
+                            <option value="verano">Verano</option>
+                            <option value="otonio">Otoño</option>
+                            <option value="invierno">Invierno</option>
+                            <option value="personalizado">Personalizado</option>
+                        </select>
+                    </label>
+                    <label>Humedad umbral (%): <input type="number" id="humThreshold" min="0" max="100" value="60"></label>
+                </div>
+                <label>Inicio luces: <input type="time" id="lightsStart"></label>
+                <label>Fin luces: <input type="time" id="lightsEnd"></label>
+                <div class="row">
+                    <label>Min encendida: <input type="number" id="pumpOnMinutes" min="1" value="2"></label>
+                    <label>Min apagada: <input type="number" id="pumpOffMinutes" min="1" value="10"></label>
+                </div>
+                <button id="saveParams">Guardar</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="autoLogic.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
