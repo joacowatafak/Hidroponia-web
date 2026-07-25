@@ -56,13 +56,14 @@
             </div>
             <div class="card">
                 <h2>⚙️ Modo y horarios</h2>
-                <label class="switch-row">
-                    <span>Modo automático</span>
-                    <label class="switch">
-                        <input type="checkbox" id="modoAuto">
-                        <span class="slider"></span>
+                <div class="row">
+                    <label class="mode-control">Modo:
+                        <div class="mode-toggle-row">
+                            <button id="modeManualBtn" type="button">Manual</button>
+                            <button id="modeAutoBtn" type="button">Automático</button>
+                        </div>
                     </label>
-                </label>
+                </div>
                 <div class="row">
                     <label>Estación:
                         <select id="epocaSelect">
@@ -80,7 +81,10 @@
                     <label>Bomba: min encendida <input type="number" id="pumpOnMinutes" min="1" value="2"></label>
                     <label>Bomba: min apagada <input type="number" id="pumpOffMinutes" min="1" value="10"></label>
                 </div>
-                <button id="saveParams">Guardar</button>
+                <div class="row">
+                    <button id="saveParams">Guardar</button>
+                    <button id="clearParams" type="button">Limpiar</button>
+                </div>
             </div>
         </div>
     </div>
