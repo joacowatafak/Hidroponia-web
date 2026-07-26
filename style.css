@@ -97,26 +97,62 @@ p {
 }
 
 .summary-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 10px;
     margin-top: 10px;
 }
 
 .compact-summary {
-    flex: 1;
+    min-height: 104px;
     text-align: center;
-    padding: 10px 8px;
+    padding: 10px 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
 }
 
 .compact-summary h3 {
     font-size: 14px;
-    margin-bottom: 4px;
+    margin-bottom: 6px;
 }
 
 .compact-summary p {
     font-size: 20px;
     margin: 0;
     font-weight: bold;
+}
+
+.compact-summary .ph-range-status {
+    margin-top: 8px;
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.2px;
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.24);
+    line-height: 1.1;
+}
+
+.ph-value {
+    font-variant-numeric: tabular-nums;
+}
+
+.ph-range-status.neutral {
+    color: #e8fff1;
+    background: rgba(12, 67, 40, 0.45);
+}
+
+.ph-range-status.safe {
+    color: #d8ffe2;
+    background: rgba(25, 112, 65, 0.45);
+}
+
+.ph-range-status.alert {
+    color: #ffd7d7;
+    background: rgba(146, 34, 34, 0.5);
+    border-color: rgba(255, 170, 170, 0.48);
 }
 
 .status-item h3 {
@@ -320,12 +356,17 @@ button:disabled {
     }
 
     .summary-row {
-        flex-direction: row;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 8px;
     }
 
     .compact-summary {
+        min-height: 96px;
         padding: 8px 6px;
+    }
+
+    .compact-summary .ph-range-status {
+        font-size: 10px;
     }
 
     label {

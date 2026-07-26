@@ -32,6 +32,8 @@ const saveSettingsBtn = document.getElementById('saveSettings');
 const connStatusEl = document.getElementById('connStatus');
 const tempEl = document.getElementById('temp');
 const humEl = document.getElementById('hum');
+const phEl = document.getElementById('ph');
+const phRangeStatusEl = document.getElementById('phRangeStatus');
 const serverTimeEl = document.getElementById('serverTime');
 const lightsStartEl = document.getElementById('lightsStart');
 const lightsEndEl = document.getElementById('lightsEnd');
@@ -52,6 +54,8 @@ const MODE_SCHEDULE_SYNC_TOPIC = 'hidroponia/ui/mode-schedule';
 const ESP_CONFIG_TOPIC = 'hidroponia/config';
 const isGithubHosted = /github\.io$/i.test(window.location.hostname || '');
 const isHttpsPage = window.location.protocol === 'https:';
+const PH_SAFE_MIN = 5.8;
+const PH_SAFE_MAX = 6.2;
 
 let settings = {
   espIp: localStorage.getItem('espIp') || '',
@@ -83,6 +87,69 @@ let pumpCycleActive = false;
 let actionToastTimer = null;
 
 const autoLogic = window.AutoLogic;
+
+function updatePhDisplay(phValue) {
+  if (!phEl || !phRangeStatusEl) return;
+
+  const numericPh = Number(phValue);
+  const hasValidPh = Number.isFinite(numericPh);
+
+  phRangeStatusEl.classList.remove('safe', 'alert');
+  phRangeStatusEl.classList.add('neutral');
+
+  if (!hasValidPh) {
+    phEl.textContent = 'SIN DATOS';
+    phRangeStatusEl.textContent = 'Rango seguro 5.8 - 6.2';
+    return;
+  }
+
+  phEl.textContent = numericPh.toFixed(2);
+
+  if (numericPh >= PH_SAFE_MIN && numericPh <= PH_SAFE_MAX) {
+    phRangeStatusEl.textContent = 'Dentro de rango';
+    phRangeStatusEl.classList.remove('neutral');
+    phRangeStatusEl.classList.add('safe');
+  } else {
+    phRangeStatusEl.textContent = 'Peligroso: fuera de rango';
+    phRangeStatusEl.classList.remove('neutral');
+    phRangeStatusEl.classList.add('alert');
+  }
+}
+
+function setActuatorStatePending() {
+  if (currentLuzState === null && estadoLuzEl) {
+    estadoLuzEl.textContent = '...';
+  }
+  if (currentBombaState === null && estadoBombaEl) {
+    estadoBombaEl.textContent = '...';
+  }
+}
+
+function setActuatorStateUnavailable() {
+  if (currentLuzState === null && estadoLuzEl) {
+    estadoLuzEl.textContent = 'SIN DATOS';
+  }
+  if (currentBombaState === null && estadoBombaEl) {
+    estadoBombaEl.textContent = 'SIN DATOS';
+  }
+}
+
+async function initialStatusBootstrap() {
+  setActuatorStatePending();
+
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const data = await fetchStatus(true);
+    if (data) {
+      return;
+    }
+    if (attempt < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+  }
+
+  setActuatorStateUnavailable();
+}
 
 function safeStorageSet(storage, key, value) {
   try {
@@ -552,6 +619,45 @@ function getConfigUrlCandidates() {
   return [...new Set(candidates)];
 }
 
+function getStatusUrlCandidates() {
+  const candidates = [];
+
+  const espBase = baseUrl();
+  if (espBase) {
+    candidates.push(`${espBase}/status`);
+    candidates.push(`${espBase}/sensor`);
+  }
+
+  const directBase = getBaseUrl();
+  if (directBase) {
+    candidates.push(`${directBase}/status`);
+    candidates.push(`${directBase}/sensor`);
+  }
+
+  if (settings.espIp) {
+    const normalizedIp = settings.espIp.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    candidates.push(`http://${normalizedIp}/status`);
+    candidates.push(`http://${normalizedIp}/sensor`);
+  }
+
+  const currentOrigin = window.location.origin;
+  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
+    candidates.push(`${currentOrigin}/status`);
+    candidates.push(`${currentOrigin}/sensor`);
+  }
+
+  const currentHost = window.location.hostname;
+  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
+    candidates.push(`http://${currentHost}/status`);
+    candidates.push(`http://${currentHost}/sensor`);
+  }
+
+  candidates.push('http://esp8266.local/status');
+  candidates.push('http://esp8266.local/sensor');
+
+  return [...new Set(candidates)];
+}
+
 async function fetchServerTime() {
   for (const url of getTimeUrlCandidates()) {
     try {
@@ -789,6 +895,7 @@ function onMessageArrived(message) {
       if (data.hum !== null && data.hum !== undefined) {
         humEl.textContent = `${data.hum}%`;
       }
+      updatePhDisplay(data.ph);
       applyActuatorStatesFromPayload(data);
       mqttStatusEl.textContent = 'Datos recibidos del broker';
       connStatusEl.textContent = 'Conectado por MQTT';
@@ -924,68 +1031,67 @@ async function fetchStatus(forceHttp = false) {
     const telemetryFresh = Boolean(lastTelemetry) && (Date.now() - lastTelemetryAt) <= 15000;
     if (telemetryFresh) {
       applyActuatorStatesFromPayload(lastTelemetry);
-      connStatusEl.textContent = 'Conectado por MQTT';
+      if (connStatusEl) connStatusEl.textContent = 'Conectado por MQTT';
       return lastTelemetry;
     }
   }
 
-  const base = baseUrl();
-  if (!base) return null;
+  const statusCandidates = getStatusUrlCandidates();
+  if (statusCandidates.length === 0) return null;
 
-  try {
-    const res = await fetch(`${base}/status`);
-    if (!res.ok) throw new Error('no status');
-    const data = await res.json();
-    lastTelemetry = data;
-    lastTelemetryAt = Date.now();
-    if (data.serverTime) {
-      serverTimeEl.textContent = data.serverTime;
-    }
-    applyAutoSettingsFromStatus(data);
-    if (data.temp === null || data.temp === undefined) {
-      tempEl.textContent = 'Error de datos';
-    } else {
-      tempEl.textContent = `${data.temp}°C`;
-    }
-    if (data.hum === null || data.hum === undefined) {
-      humEl.textContent = 'Error de datos';
-    } else {
-      humEl.textContent = `${data.hum}%`;
-    }
-    applyActuatorStatesFromPayload(data);
-    connStatusEl.textContent = `Conectado (${data.serverTime || 'sin hora'})`;
-    return data;
-  } catch (err) {
+  let lastError = null;
+
+  for (const url of statusCandidates) {
     try {
-      const res = await fetch(`${base}/sensor`);
-      if (!res.ok) throw new Error('no sensor');
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
       const data = await res.json();
+      if (!data || typeof data !== 'object') {
+        throw new Error('Respuesta de estado invalida');
+      }
+
       lastTelemetry = data;
       lastTelemetryAt = Date.now();
-      if (data.serverTime) {
+
+      if (data.serverTime && serverTimeEl) {
         serverTimeEl.textContent = data.serverTime;
       }
+
       applyAutoSettingsFromStatus(data);
-      if (data.temp === null || data.temp === undefined) {
-        tempEl.textContent = 'Error de datos';
-      } else {
-        tempEl.textContent = `${data.temp}°C`;
+
+      if (tempEl) {
+        if (data.temp === null || data.temp === undefined) {
+          tempEl.textContent = 'Error de datos';
+        } else {
+          tempEl.textContent = `${data.temp}°C`;
+        }
       }
-      if (data.hum === null || data.hum === undefined) {
-        humEl.textContent = 'Error de datos';
-      } else {
-        humEl.textContent = `${data.hum}%`;
+
+      if (humEl) {
+        if (data.hum === null || data.hum === undefined) {
+          humEl.textContent = 'Error de datos';
+        } else {
+          humEl.textContent = `${data.hum}%`;
+        }
       }
+
+      updatePhDisplay(data.ph);
+
       applyActuatorStatesFromPayload(data);
-      connStatusEl.textContent = 'Conectado';
+      if (connStatusEl) connStatusEl.textContent = `Conectado (${data.serverTime || 'sin hora'})`;
       return data;
-    } catch (fallbackError) {
-      connStatusEl.textContent = 'No responde el ESP (sensor)';
-      tempEl.textContent = 'Error de datos';
-      humEl.textContent = 'Error de datos';
-      return null;
+    } catch (err) {
+      lastError = err;
     }
   }
+
+  if (connStatusEl) connStatusEl.textContent = 'No responde el ESP';
+  if (tempEl) tempEl.textContent = 'Error de datos';
+  if (humEl) humEl.textContent = 'Error de datos';
+  updatePhDisplay(null);
+  console.warn('No se pudo obtener estado del ESP:', lastError);
+  return null;
 }
 
 async function automaticControl() {
@@ -1162,7 +1268,7 @@ setInterval(async () => {
   }
 }, 1000);
 
-fetchStatus();
+void initialStatusBootstrap();
 if (settings.mqttHost) {
   connectToBroker();
 }
