@@ -71,6 +71,7 @@ let settings = {
 let mqttClient = null;
 let mqttConnected = false;
 let lastTelemetry = null;
+let lastTelemetryAt = 0;
 let settingsSyncChannel = null;
 let settingsSyncStorageKey = 'hidroponia:settings-sync';
 let settingsSyncId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -610,6 +611,28 @@ function applyLastKnownActuatorState() {
   }
 }
 
+function applyActuatorStatesFromPayload(data) {
+  if (!data || typeof data !== 'object') return;
+
+  if (data.luz !== undefined) {
+    const luzState = normalizeBoolean(data.luz);
+    if (luzState !== null) {
+      setDeviceState('luz', luzState);
+    } else if (estadoLuzEl) {
+      estadoLuzEl.textContent = String(data.luz).toUpperCase();
+    }
+  }
+
+  if (data.bomba !== undefined) {
+    const bombaState = normalizeBoolean(data.bomba);
+    if (bombaState !== null) {
+      setDeviceState('bomba', bombaState);
+    } else if (estadoBombaEl) {
+      estadoBombaEl.textContent = String(data.bomba).toUpperCase();
+    }
+  }
+}
+
 function applyAutoSettingsFromStatus(data) {
   if (!data || typeof data !== 'object') return;
 
@@ -731,6 +754,9 @@ function onConnectSuccess() {
   mqttClient.subscribe('hidroponia/commands/luz');
   mqttClient.subscribe('hidroponia/commands/bomba');
   mqttClient.subscribe(MODE_SCHEDULE_SYNC_TOPIC);
+
+  // Fuerza un snapshot inicial para evitar mostrar OFF por defecto tras recargar.
+  void fetchStatus(true);
 }
 
 function onConnectFailure(error) {
@@ -755,6 +781,7 @@ function onMessageArrived(message) {
     if (topic === 'hidroponia/telemetry') {
       const data = JSON.parse(payload);
       lastTelemetry = data;
+      lastTelemetryAt = Date.now();
       applyAutoSettingsFromStatus(data);
       if (data.temp !== null && data.temp !== undefined) {
         tempEl.textContent = `${data.temp}°C`;
@@ -762,22 +789,7 @@ function onMessageArrived(message) {
       if (data.hum !== null && data.hum !== undefined) {
         humEl.textContent = `${data.hum}%`;
       }
-      if (data.luz !== undefined) {
-        const luzState = normalizeBoolean(data.luz);
-        if (luzState !== null) {
-          setDeviceState('luz', luzState);
-        } else {
-          estadoLuzEl.textContent = String(data.luz).toUpperCase();
-        }
-      }
-      if (data.bomba !== undefined) {
-        const bombaState = normalizeBoolean(data.bomba);
-        if (bombaState !== null) {
-          setDeviceState('bomba', bombaState);
-        } else {
-          estadoBombaEl.textContent = String(data.bomba).toUpperCase();
-        }
-      }
+      applyActuatorStatesFromPayload(data);
       mqttStatusEl.textContent = 'Datos recibidos del broker';
       connStatusEl.textContent = 'Conectado por MQTT';
       return;
@@ -909,8 +921,12 @@ if (bombaOffBtn) {
 
 async function fetchStatus(forceHttp = false) {
   if (mqttConnected && !forceHttp) {
-    connStatusEl.textContent = 'Conectado por MQTT';
-    return lastTelemetry;
+    const telemetryFresh = Boolean(lastTelemetry) && (Date.now() - lastTelemetryAt) <= 15000;
+    if (telemetryFresh) {
+      applyActuatorStatesFromPayload(lastTelemetry);
+      connStatusEl.textContent = 'Conectado por MQTT';
+      return lastTelemetry;
+    }
   }
 
   const base = baseUrl();
@@ -920,6 +936,8 @@ async function fetchStatus(forceHttp = false) {
     const res = await fetch(`${base}/status`);
     if (!res.ok) throw new Error('no status');
     const data = await res.json();
+    lastTelemetry = data;
+    lastTelemetryAt = Date.now();
     if (data.serverTime) {
       serverTimeEl.textContent = data.serverTime;
     }
@@ -934,22 +952,7 @@ async function fetchStatus(forceHttp = false) {
     } else {
       humEl.textContent = `${data.hum}%`;
     }
-    if (data.luz !== undefined) {
-      const luzState = normalizeBoolean(data.luz);
-      if (luzState !== null) {
-        setDeviceState('luz', luzState);
-      } else {
-        estadoLuzEl.textContent = String(data.luz).toUpperCase();
-      }
-    }
-    if (data.bomba !== undefined) {
-      const bombaState = normalizeBoolean(data.bomba);
-      if (bombaState !== null) {
-        setDeviceState('bomba', bombaState);
-      } else {
-        estadoBombaEl.textContent = String(data.bomba).toUpperCase();
-      }
-    }
+    applyActuatorStatesFromPayload(data);
     connStatusEl.textContent = `Conectado (${data.serverTime || 'sin hora'})`;
     return data;
   } catch (err) {
@@ -957,6 +960,8 @@ async function fetchStatus(forceHttp = false) {
       const res = await fetch(`${base}/sensor`);
       if (!res.ok) throw new Error('no sensor');
       const data = await res.json();
+      lastTelemetry = data;
+      lastTelemetryAt = Date.now();
       if (data.serverTime) {
         serverTimeEl.textContent = data.serverTime;
       }
@@ -971,22 +976,7 @@ async function fetchStatus(forceHttp = false) {
       } else {
         humEl.textContent = `${data.hum}%`;
       }
-      if (data.luz !== undefined) {
-        const luzState = normalizeBoolean(data.luz);
-        if (luzState !== null) {
-          setDeviceState('luz', luzState);
-        } else {
-          estadoLuzEl.textContent = String(data.luz).toUpperCase();
-        }
-      }
-      if (data.bomba !== undefined) {
-        const bombaState = normalizeBoolean(data.bomba);
-        if (bombaState !== null) {
-          setDeviceState('bomba', bombaState);
-        } else {
-          estadoBombaEl.textContent = String(data.bomba).toUpperCase();
-        }
-      }
+      applyActuatorStatesFromPayload(data);
       connStatusEl.textContent = 'Conectado';
       return data;
     } catch (fallbackError) {
