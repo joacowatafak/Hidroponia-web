@@ -52,6 +52,7 @@ const manualControlButtons = [luzOnBtn, luzOffBtn, bombaOnBtn, bombaOffBtn].filt
 const autoConfigActionButtons = [saveParamsBtn, clearParamsBtn].filter(Boolean);
 const MODE_SCHEDULE_SYNC_TOPIC = 'hidroponia/ui/mode-schedule';
 const ESP_CONFIG_TOPIC = 'hidroponia/config';
+const ESP_STATUS_REQUEST_TOPIC = 'hidroponia/status/request';
 const isGithubHosted = /github\.io$/i.test(window.location.hostname || '');
 const isHttpsPage = window.location.protocol === 'https:';
 const PH_SAFE_MIN = 5.8;
@@ -1094,6 +1095,19 @@ async function fetchStatus(forceHttp = false) {
   return null;
 }
 
+function requestStatusSnapshot() {
+  if (mqttConnected && mqttClient) {
+    try {
+      mqttClient.send(ESP_STATUS_REQUEST_TOPIC, 'now');
+      return;
+    } catch (err) {
+      console.warn('No se pudo solicitar estado por MQTT, intento HTTP:', err);
+    }
+  }
+
+  void fetchStatus(true);
+}
+
 async function automaticControl() {
   // El control automático lo resuelve el ESP8266.
   // La web solo configura parámetros y envía comandos manuales.
@@ -1252,7 +1266,7 @@ autoSettingsInputs.forEach((element) => {
 
 initSettingsSync();
 
-setInterval(fetchStatus, 5000);
+setInterval(requestStatusSnapshot, 1000);
 setInterval(async () => {
   try {
     const serverTime = await fetchServerTime();
