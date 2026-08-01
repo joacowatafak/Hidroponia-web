@@ -16,22 +16,14 @@
 
         <div class="section-block">
             <div class="card">
-                <h2>🔌 Conexión MQTT / WebSocket</h2>
-                <label>Broker: <input type="text" id="mqttHost" placeholder="af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud" value="af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud"></label>
-                <label>Puerto WS: <input type="number" id="mqttPort" min="1" value="8884"></label>
-                <label>Usuario: <input type="text" id="mqttUser" placeholder="usuario"></label>
-                <label>Contraseña: <input type="password" id="mqttPassword" placeholder="contraseña"></label>
-                <div class="row">
-                    <button id="connectBroker">Conectar broker</button>
-                    <button id="disconnectBroker">Desconectar</button>
-                </div>
-                <p id="mqttStatus">Desconectado</p>
-            </div>
-
-            <div class="card">
-                <h2>🔌 Fallback ESP8266</h2>
-                <label>IP del ESP8266: <input type="text" id="espIp" placeholder="192.168.1.50"></label>
-                <button id="saveSettings">Guardar ajustes</button>
+                <h2>👤 Acceso de tu placa</h2>
+                <label>IP de la placa (manual): <input type="text" id="espIp" placeholder="192.168.1.50"></label>
+                <label>Usuario de la placa: <input type="text" id="appUser" placeholder="usuario"></label>
+                <label>Contraseña de la placa: <input type="password" id="appPassword" placeholder="contraseña"></label>
+                <button id="loginBoard">Vincular esta web con mi placa</button>
+                <button id="saveSettings">Guardar IP</button>
+                <p id="authStatus">Sin autenticar</p>
+                <p>ID de placa: <strong id="deviceIdDisplay">--</strong></p>
                 <p id="connStatus">Sin conexión</p>
             </div>
         </div>

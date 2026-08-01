@@ -26,7 +26,6 @@ const modeManualBtn = document.getElementById('modeManualBtn');
 const modeAutoBtn = document.getElementById('modeAutoBtn');
 const modoAutoEl = document.getElementById('modoAuto');
 const epocaSelect = document.getElementById('epocaSelect');
-const humThresholdEl = document.getElementById('humThreshold');
 const espIpEl = document.getElementById('espIp');
 const saveSettingsBtn = document.getElementById('saveSettings');
 const connStatusEl = document.getElementById('connStatus');
@@ -46,13 +45,33 @@ const mqttPasswordEl = document.getElementById('mqttPassword');
 const connectBrokerBtn = document.getElementById('connectBroker');
 const disconnectBrokerBtn = document.getElementById('disconnectBroker');
 const mqttStatusEl = document.getElementById('mqttStatus');
+const appUserEl = document.getElementById('appUser');
+const appPasswordEl = document.getElementById('appPassword');
+const loginBoardBtn = document.getElementById('loginBoard');
+const authStatusEl = document.getElementById('authStatus');
+const deviceIdDisplayEl = document.getElementById('deviceIdDisplay');
 const saveParamsBtn = document.getElementById('saveParams');
 const clearParamsBtn = document.getElementById('clearParams');
+const systemStateBadgeEl = document.getElementById('systemStateBadge');
+const lastUpdateElapsedEl = document.getElementById('lastUpdateElapsed');
+const telemetrySourceEl = document.getElementById('telemetrySource');
+const summaryModeEl = document.getElementById('summaryMode');
+const summaryLightsEl = document.getElementById('summaryLights');
+const summaryPumpEl = document.getElementById('summaryPump');
+const summaryLuzStateEl = document.getElementById('summaryLuzState');
+const summaryBombaStateEl = document.getElementById('summaryBombaState');
 const manualControlButtons = [luzOnBtn, luzOffBtn, bombaOnBtn, bombaOffBtn].filter(Boolean);
 const autoConfigActionButtons = [saveParamsBtn, clearParamsBtn].filter(Boolean);
-const MODE_SCHEDULE_SYNC_TOPIC = 'hidroponia/ui/mode-schedule';
-const ESP_CONFIG_TOPIC = 'hidroponia/config';
-const ESP_STATUS_REQUEST_TOPIC = 'hidroponia/status/request';
+const STATUS_REQUEST_FALLBACK_MS = 1800;
+const STATUS_POLL_INTERVAL_ACTIVE_MS = 4000;
+const STATUS_POLL_INTERVAL_HIDDEN_MS = 15000;
+const STATUS_MIN_REQUEST_GAP_MS = 1500;
+const TELEMETRY_FRESH_MS = 9000;
+const SERVER_TIME_SYNC_INTERVAL_MS = 15000;
+const FIXED_MQTT_HOST = 'af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud';
+const FIXED_MQTT_PORT = '8884';
+const FIXED_MQTT_USER = 'hidroweb';
+const FIXED_MQTT_PASSWORD = 'Frajoafed1377';
 const isGithubHosted = /github\.io$/i.test(window.location.hostname || '');
 const isHttpsPage = window.location.protocol === 'https:';
 const PH_SAFE_MIN = 5.8;
@@ -60,13 +79,15 @@ const PH_SAFE_MAX = 6.2;
 
 let settings = {
   espIp: localStorage.getItem('espIp') || '',
-  mqttHost: localStorage.getItem('mqttHost') || 'af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud',
-  mqttPort: localStorage.getItem('mqttPort') || '8884',
-  mqttUser: localStorage.getItem('mqttUser') || '',
-  mqttPassword: localStorage.getItem('mqttPassword') || '',
+  mqttHost: FIXED_MQTT_HOST,
+  mqttPort: FIXED_MQTT_PORT,
+  mqttUser: FIXED_MQTT_USER,
+  mqttPassword: FIXED_MQTT_PASSWORD,
+  appUser: localStorage.getItem('appUser') || '',
+  appPassword: localStorage.getItem('appPassword') || '',
+  deviceId: localStorage.getItem('deviceId') || '',
   modoAuto: localStorage.getItem('modoAuto') === 'true',
   epoca: localStorage.getItem('epoca') || 'primavera',
-  humThreshold: localStorage.getItem('humThreshold') || '60',
   lightsStart: localStorage.getItem('lightsStart') || '',
   lightsEnd: localStorage.getItem('lightsEnd') || '',
   pumpOnMinutes: localStorage.getItem('pumpOnMinutes') || localStorage.getItem('pumpInterval') || '2',
@@ -86,8 +107,59 @@ let lastPumpRunAt = null;
 let pumpCycleTimer = null;
 let pumpCycleActive = false;
 let actionToastTimer = null;
+let statusFallbackTimer = null;
+let lastTelemetrySource = '--';
+let statusPollingTimer = null;
+let statusRequestInFlight = false;
+let lastStatusRequestAt = 0;
 
 const autoLogic = window.AutoLogic;
+
+function enforceFixedMqttSettings() {
+  settings.mqttHost = FIXED_MQTT_HOST;
+  settings.mqttPort = FIXED_MQTT_PORT;
+  settings.mqttUser = FIXED_MQTT_USER;
+  settings.mqttPassword = FIXED_MQTT_PASSWORD;
+}
+
+function activeDeviceId() {
+  return (settings.deviceId || '').trim().toLowerCase();
+}
+
+function mqttTopic(suffix) {
+  const deviceId = activeDeviceId();
+  if (!deviceId) return null;
+  return `hidroponia/${deviceId}/${suffix}`;
+}
+
+function modeScheduleTopic() {
+  return mqttTopic('ui/mode-schedule');
+}
+
+function configTopic() {
+  return mqttTopic('config');
+}
+
+function statusRequestTopic() {
+  return mqttTopic('status/request');
+}
+
+function commandTopic(device) {
+  return mqttTopic(`commands/${device}`);
+}
+
+function telemetryTopic() {
+  return mqttTopic('telemetry');
+}
+
+function withAuthUrl(url) {
+  if (!settings.appUser || !settings.appPassword) {
+    return url;
+  }
+
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}user=${encodeURIComponent(settings.appUser)}&pass=${encodeURIComponent(settings.appPassword)}`;
+}
 
 function updatePhDisplay(phValue) {
   if (!phEl || !phRangeStatusEl) return;
@@ -117,21 +189,226 @@ function updatePhDisplay(phValue) {
   }
 }
 
+function setSystemBadge(text, tone = 'neutral') {
+  if (!systemStateBadgeEl) return;
+  systemStateBadgeEl.textContent = text;
+  systemStateBadgeEl.classList.remove('ok', 'warn', 'error', 'neutral');
+  systemStateBadgeEl.classList.add(tone);
+}
+
+function updateConnectionIndicators() {
+  const ageMs = lastTelemetryAt ? Date.now() - lastTelemetryAt : Number.POSITIVE_INFINITY;
+
+  if (!Number.isFinite(ageMs)) {
+    setSystemBadge('Sin datos', 'warn');
+  } else if (ageMs <= 3000) {
+    setSystemBadge('En linea', 'ok');
+  } else if (ageMs <= 12000) {
+    setSystemBadge('Degradado', 'warn');
+  } else {
+    setSystemBadge('Sin conexion', 'error');
+  }
+
+  if (telemetrySourceEl) {
+    telemetrySourceEl.textContent = lastTelemetrySource;
+  }
+}
+
+function formatElapsed(ms) {
+  if (!Number.isFinite(ms)) return '--';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 1) return '<1s';
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  return `${min}m ${sec % 60}s`;
+}
+
+function updateLastUpdateElapsed() {
+  if (!lastUpdateElapsedEl) return;
+
+  if (!lastTelemetryAt) {
+    lastUpdateElapsedEl.textContent = '--';
+    updateConnectionIndicators();
+    return;
+  }
+
+  const ageMs = Date.now() - lastTelemetryAt;
+  lastUpdateElapsedEl.textContent = formatElapsed(ageMs);
+  updateConnectionIndicators();
+}
+
+function setDeviceStateClass(element, state) {
+  if (!element) return;
+  element.classList.remove('on', 'off', 'pending', 'unknown');
+
+  if (state === true) {
+    element.classList.add('on');
+    return;
+  }
+
+  if (state === false) {
+    element.classList.add('off');
+    return;
+  }
+
+  if (state === 'pending') {
+    element.classList.add('pending');
+    return;
+  }
+
+  element.classList.add('unknown');
+}
+
+function updateAutoConfigSummary() {
+  const luzState = currentLuzState !== null ? currentLuzState : normalizeBoolean(lastTelemetry?.luz);
+  const bombaState = currentBombaState !== null ? currentBombaState : normalizeBoolean(lastTelemetry?.bomba);
+
+  if (summaryModeEl) {
+    summaryModeEl.textContent = settings.modoAuto ? 'Automatico' : 'Manual';
+  }
+  if (summaryLightsEl) {
+    summaryLightsEl.textContent = `${settings.lightsStart || '--:--'} -> ${settings.lightsEnd || '--:--'}`;
+  }
+  if (summaryPumpEl) {
+    summaryPumpEl.textContent = `${settings.pumpOnMinutes || '--'}m ON / ${settings.pumpOffMinutes || '--'}m OFF`;
+  }
+  if (summaryLuzStateEl) {
+    summaryLuzStateEl.textContent = luzState === null ? 'SIN DATOS' : (luzState ? 'ON' : 'OFF');
+  }
+  if (summaryBombaStateEl) {
+    summaryBombaStateEl.textContent = bombaState === null ? 'SIN DATOS' : (bombaState ? 'ON' : 'OFF');
+  }
+}
+
+function updateAuthUi() {
+  if (appUserEl) appUserEl.value = settings.appUser;
+  if (appPasswordEl) appPasswordEl.value = settings.appPassword;
+  if (deviceIdDisplayEl) deviceIdDisplayEl.textContent = activeDeviceId() || '--';
+
+  if (authStatusEl) {
+    authStatusEl.textContent = activeDeviceId()
+      ? `Autenticado para placa ${activeDeviceId()}`
+      : 'Sin autenticar';
+  }
+}
+
+function isTelemetryFresh(maxAgeMs = TELEMETRY_FRESH_MS) {
+  return Boolean(lastTelemetry) && (Date.now() - lastTelemetryAt) <= maxAgeMs;
+}
+
+function currentStatusPollIntervalMs() {
+  const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+  if (hidden) return STATUS_POLL_INTERVAL_HIDDEN_MS;
+  return STATUS_POLL_INTERVAL_ACTIVE_MS;
+}
+
+function scheduleStatusPolling() {
+  if (statusPollingTimer) {
+    clearTimeout(statusPollingTimer);
+  }
+
+  statusPollingTimer = setTimeout(() => {
+    requestStatusSnapshot();
+    scheduleStatusPolling();
+  }, currentStatusPollIntervalMs());
+}
+
+async function loginBoardAccount() {
+  syncSettingsFromInputs();
+
+  if (!settings.appUser || !settings.appPassword) {
+    if (authStatusEl) authStatusEl.textContent = 'Completa usuario y contraseña';
+    return;
+  }
+
+  if (authStatusEl) authStatusEl.textContent = 'Buscando placa...';
+
+  const authCandidates = [];
+  const currentOrigin = window.location.origin;
+  const currentHost = window.location.hostname;
+
+  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
+    authCandidates.push(`${currentOrigin}/auth/login`);
+  }
+
+  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
+    authCandidates.push(`http://${currentHost}/auth/login`);
+  }
+
+  if (settings.espIp) {
+    const normalized = String(settings.espIp).trim();
+    if (normalized.startsWith('http')) {
+      authCandidates.push(`${normalized.replace(/\/$/, '')}/auth/login`);
+    } else {
+      authCandidates.push(`http://${normalized}/auth/login`);
+    }
+  }
+
+  authCandidates.push('http://esp8266.local/auth/login');
+  authCandidates.push('http://hidro-control.local/auth/login');
+
+  const uniqueCandidates = [...new Set(authCandidates.filter(Boolean))];
+
+  for (const target of uniqueCandidates) {
+    try {
+      const body = new URLSearchParams({ user: settings.appUser, pass: settings.appPassword });
+      const res = await fetch(target, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+        cache: 'no-store'
+      });
+
+      if (!res.ok) {
+        continue;
+      }
+
+      const data = await res.json();
+      if (!data?.ok || !data?.deviceId) {
+        continue;
+      }
+
+      settings.deviceId = String(data.deviceId).toLowerCase();
+      safeStorageSet(window.localStorage, 'deviceId', settings.deviceId);
+      updateAuthUi();
+
+      if (authStatusEl) authStatusEl.textContent = `Acceso OK a placa ${settings.deviceId}`;
+
+      if (mqttClient && mqttClient.isConnected()) {
+        disconnectBroker();
+        connectToBroker();
+      }
+
+      requestStatusSnapshot();
+      return;
+    } catch (err) {
+      // Intenta con la siguiente URL
+    }
+  }
+
+  if (authStatusEl) authStatusEl.textContent = 'No se encontró la placa en la red';
+  console.warn('No se pudo autenticar placa con ninguna URL candidata');
+}
+
 function setActuatorStatePending() {
   if (currentLuzState === null && estadoLuzEl) {
     estadoLuzEl.textContent = '...';
+    setDeviceStateClass(estadoLuzEl, 'pending');
   }
   if (currentBombaState === null && estadoBombaEl) {
     estadoBombaEl.textContent = '...';
+    setDeviceStateClass(estadoBombaEl, 'pending');
   }
 }
 
 function setActuatorStateUnavailable() {
   if (currentLuzState === null && estadoLuzEl) {
     estadoLuzEl.textContent = 'SIN DATOS';
+    setDeviceStateClass(estadoLuzEl, null);
   }
   if (currentBombaState === null && estadoBombaEl) {
     estadoBombaEl.textContent = 'SIN DATOS';
+    setDeviceStateClass(estadoBombaEl, null);
   }
 }
 
@@ -149,7 +426,29 @@ async function initialStatusBootstrap() {
     }
   }
 
+  if (settings.mqttHost) {
+    requestStatusSnapshot();
+    return;
+  }
+
   setActuatorStateUnavailable();
+}
+
+function scheduleStatusHttpFallback() {
+  if (statusFallbackTimer) {
+    clearTimeout(statusFallbackTimer);
+  }
+
+  statusFallbackTimer = setTimeout(() => {
+    const telemetryFresh = isTelemetryFresh(STATUS_REQUEST_FALLBACK_MS);
+    if (!telemetryFresh) {
+      void fetchStatus(true).finally(() => {
+        statusRequestInFlight = false;
+      });
+    } else {
+      statusRequestInFlight = false;
+    }
+  }, STATUS_REQUEST_FALLBACK_MS);
 }
 
 function safeStorageSet(storage, key, value) {
@@ -194,6 +493,9 @@ function initSettingsSync() {
 function broadcastSettingsUpdate() {
   if (!mqttClient || !mqttClient.isConnected()) return;
 
+  const topic = modeScheduleTopic();
+  if (!topic) return;
+
   const payload = {
     type: 'mode-schedule-updated',
     source: settingsSyncId,
@@ -204,13 +506,12 @@ function broadcastSettingsUpdate() {
       lightsStart: settings.lightsStart,
       lightsEnd: settings.lightsEnd,
       pumpOnMinutes: settings.pumpOnMinutes,
-      pumpOffMinutes: settings.pumpOffMinutes,
-      humThreshold: settings.humThreshold
+      pumpOffMinutes: settings.pumpOffMinutes
     }
   };
 
   try {
-    mqttClient.send(MODE_SCHEDULE_SYNC_TOPIC, JSON.stringify(payload));
+    mqttClient.send(topic, JSON.stringify(payload));
   } catch (err) {
     console.warn('No se pudo sincronizar modo y horarios:', err);
   }
@@ -290,15 +591,18 @@ function updateAutoConfigButtonsAvailability() {
 }
 
 function applySettingsToUI() {
+  enforceFixedMqttSettings();
+
   if (espIpEl) espIpEl.value = settings.espIp;
   if (mqttHostEl) mqttHostEl.value = settings.mqttHost;
   if (mqttPortEl) mqttPortEl.value = settings.mqttPort;
   if (mqttUserEl) mqttUserEl.value = settings.mqttUser;
   if (mqttPasswordEl) mqttPasswordEl.value = settings.mqttPassword;
+  if (appUserEl) appUserEl.value = settings.appUser;
+  if (appPasswordEl) appPasswordEl.value = settings.appPassword;
   if (modeSelectEl) modeSelectEl.value = settings.modoAuto ? 'auto' : 'manual';
   if (modoAutoEl) modoAutoEl.checked = settings.modoAuto;
   if (epocaSelect) epocaSelect.value = settings.epoca || 'personalizado';
-  if (humThresholdEl) humThresholdEl.value = settings.humThreshold;
   if (lightsStartEl) lightsStartEl.value = settings.lightsStart || '08:00';
   if (lightsEndEl) lightsEndEl.value = settings.lightsEnd || '20:00';
   if (pumpOnMinutesEl) pumpOnMinutesEl.value = settings.pumpOnMinutes || '2';
@@ -309,14 +613,16 @@ function applySettingsToUI() {
   }
   updateManualControlsAvailability();
   updateAutoConfigButtonsAvailability();
+  updateAutoConfigSummary();
+  updateAuthUi();
 }
 
 function syncSettingsFromInputs() {
+  enforceFixedMqttSettings();
+
   if (espIpEl) settings.espIp = espIpEl.value.trim();
-  if (mqttHostEl) settings.mqttHost = mqttHostEl.value.trim();
-  if (mqttPortEl) settings.mqttPort = mqttPortEl.value.trim();
-  if (mqttUserEl) settings.mqttUser = mqttUserEl.value.trim();
-  if (mqttPasswordEl) settings.mqttPassword = mqttPasswordEl.value.trim();
+  if (appUserEl) settings.appUser = appUserEl.value.trim();
+  if (appPasswordEl) settings.appPassword = appPasswordEl.value.trim();
   if (modeSelectEl) {
     settings.modoAuto = modeSelectEl.value === 'auto';
   } else if (modeManualBtn && modeAutoBtn) {
@@ -325,20 +631,16 @@ function syncSettingsFromInputs() {
     settings.modoAuto = modoAutoEl.checked;
   }
   if (epocaSelect) settings.epoca = epocaSelect.value;
-  if (humThresholdEl) settings.humThreshold = humThresholdEl.value;
   if (lightsStartEl) settings.lightsStart = lightsStartEl.value;
   if (lightsEndEl) settings.lightsEnd = lightsEndEl.value;
   if (pumpOnMinutesEl) settings.pumpOnMinutes = pumpOnMinutesEl.value;
   if (pumpOffMinutesEl) settings.pumpOffMinutes = pumpOffMinutesEl.value;
 
   safeStorageSet(window.localStorage, 'espIp', settings.espIp);
-  safeStorageSet(window.localStorage, 'mqttHost', settings.mqttHost);
-  safeStorageSet(window.localStorage, 'mqttPort', settings.mqttPort);
-  safeStorageSet(window.localStorage, 'mqttUser', settings.mqttUser);
-  safeStorageSet(window.localStorage, 'mqttPassword', settings.mqttPassword);
+  safeStorageSet(window.localStorage, 'appUser', settings.appUser);
+  safeStorageSet(window.localStorage, 'appPassword', settings.appPassword);
   safeStorageSet(window.localStorage, 'modoAuto', String(settings.modoAuto));
   safeStorageSet(window.localStorage, 'epoca', settings.epoca);
-  safeStorageSet(window.localStorage, 'humThreshold', settings.humThreshold);
   safeStorageSet(window.localStorage, 'lightsStart', settings.lightsStart);
   safeStorageSet(window.localStorage, 'lightsEnd', settings.lightsEnd);
   safeStorageSet(window.localStorage, 'pumpOnMinutes', settings.pumpOnMinutes);
@@ -348,6 +650,7 @@ function syncSettingsFromInputs() {
   updateModeButtonsVisualState();
   updateManualControlsAvailability();
   updateAutoConfigButtonsAvailability();
+  updateAutoConfigSummary();
 }
 
 async function setModeFromButtons(nextModeAuto) {
@@ -377,7 +680,6 @@ async function setModeFromButtons(nextModeAuto) {
 function resetAutoSettingsToDefaults() {
   settings.modoAuto = false;
   settings.epoca = 'personalizado';
-  settings.humThreshold = '60';
   settings.lightsStart = '08:00';
   settings.lightsEnd = '20:00';
   settings.pumpOnMinutes = '2';
@@ -385,7 +687,6 @@ function resetAutoSettingsToDefaults() {
 
   safeStorageSet(window.localStorage, 'modoAuto', String(settings.modoAuto));
   safeStorageSet(window.localStorage, 'epoca', settings.epoca);
-  safeStorageSet(window.localStorage, 'humThreshold', settings.humThreshold);
   safeStorageSet(window.localStorage, 'lightsStart', settings.lightsStart);
   safeStorageSet(window.localStorage, 'lightsEnd', settings.lightsEnd);
   safeStorageSet(window.localStorage, 'pumpOnMinutes', settings.pumpOnMinutes);
@@ -409,11 +710,15 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
     params.set('mode', settings.modoAuto ? '1' : '0');
     params.set('lightsStart', settings.lightsStart || '08:00');
     params.set('lightsEnd', settings.lightsEnd || '20:00');
-    params.set('humThreshold', String(settings.humThreshold || 60));
     params.set('pumpOnMinutes', String(settings.pumpOnMinutes || 2));
     params.set('pumpOffMinutes', String(settings.pumpOffMinutes || 10));
     params.set('epoca', settings.epoca || 'personalizado');
     params.set('currentTime', `${String(argentinaTime.hh).padStart(2, '0')}:${String(argentinaTime.mm).padStart(2, '0')}`);
+  }
+
+  if (settings.appUser && settings.appPassword) {
+    params.set('user', settings.appUser);
+    params.set('pass', settings.appPassword);
   }
 
   const serializedParams = params.toString();
@@ -421,7 +726,9 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
 
   if (serializedParams && mqttConnected && mqttClient) {
     try {
-      mqttClient.send(ESP_CONFIG_TOPIC, serializedParams);
+      const topic = configTopic();
+      if (!topic) throw new Error('Falta deviceId para enviar config por MQTT');
+      mqttClient.send(topic, serializedParams);
       mqttDispatched = true;
       if (connStatusEl) connStatusEl.textContent = 'Config enviada por MQTT';
       return true;
@@ -473,7 +780,7 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
       try {
         const separator = url.includes('?') ? '&' : '?';
         const fallbackUrl = `${url}${separator}${params.toString()}`;
-        const fallbackRes = await fetch(fallbackUrl, {
+        const fallbackRes = await fetch(withAuthUrl(fallbackUrl), {
           method: 'GET',
           cache: 'no-store'
         });
@@ -524,6 +831,7 @@ async function saveSettings(includeAutomationSettings = true) {
     if (connStatusEl) connStatusEl.textContent = 'Ajustes guardados';
     if (mqttStatusEl) mqttStatusEl.textContent = 'Ajustes guardados';
     showActionFeedback('Guardado exitoso');
+    requestStatusSnapshot();
   }
 }
 
@@ -547,6 +855,7 @@ async function clearAutoSettings() {
   if (connStatusEl) connStatusEl.textContent = 'Configuracion automatica limpiada';
   if (mqttStatusEl) mqttStatusEl.textContent = 'Configuracion automatica limpiada';
   showActionFeedback('Configuracion automatica limpiada');
+  requestStatusSnapshot();
 }
 
 function baseUrl() {
@@ -563,99 +872,56 @@ function baseUrl() {
   return null;
 }
 
-function getTimeUrlCandidates() {
+function getEspBaseCandidates() {
   const candidates = [];
   const currentOrigin = window.location.origin;
+  const currentHost = window.location.hostname;
 
   if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
-    candidates.push(`${currentOrigin}/time`);
+    candidates.push(currentOrigin);
   }
 
-  const currentHost = window.location.hostname;
-  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1') {
-    candidates.push(`http://${currentHost}/time`);
-  }
-
-  const espBase = baseUrl();
-  if (espBase) {
-    candidates.push(`${espBase}/time`);
+  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
+    candidates.push(`http://${currentHost}`);
   }
 
   if (settings.espIp) {
-    candidates.push(`http://${settings.espIp}/time`);
+    const normalized = String(settings.espIp).trim();
+    if (normalized.startsWith('http')) {
+      candidates.push(normalized.replace(/\/$/, ''));
+    } else {
+      candidates.push(`http://${normalized}`);
+    }
   }
 
+  candidates.push('http://esp8266.local');
+  candidates.push('http://hidro-control.local');
+
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function getTimeUrlCandidates() {
+  const candidates = [];
+  for (const base of getEspBaseCandidates()) {
+    candidates.push(`${base}/time`);
+  }
   return [...new Set(candidates)];
 }
 
 function getConfigUrlCandidates() {
   const candidates = [];
-
-  const espBase = baseUrl();
-  if (espBase) {
-    candidates.push(`${espBase}/config`);
+  for (const base of getEspBaseCandidates()) {
+    candidates.push(`${base}/config`);
   }
-
-  const directBase = getBaseUrl();
-  if (directBase) {
-    candidates.push(`${directBase}/config`);
-  }
-
-  if (settings.espIp) {
-    const normalizedIp = settings.espIp.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    candidates.push(`http://${normalizedIp}/config`);
-  }
-
-  const currentOrigin = window.location.origin;
-  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
-    candidates.push(`${currentOrigin}/config`);
-  }
-
-  const currentHost = window.location.hostname;
-  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
-    candidates.push(`http://${currentHost}/config`);
-  }
-
-  candidates.push('http://esp8266.local/config');
   return [...new Set(candidates)];
 }
 
 function getStatusUrlCandidates() {
   const candidates = [];
-
-  const espBase = baseUrl();
-  if (espBase) {
-    candidates.push(`${espBase}/status`);
-    candidates.push(`${espBase}/sensor`);
+  for (const base of getEspBaseCandidates()) {
+    candidates.push(`${base}/status`);
+    candidates.push(`${base}/sensor`);
   }
-
-  const directBase = getBaseUrl();
-  if (directBase) {
-    candidates.push(`${directBase}/status`);
-    candidates.push(`${directBase}/sensor`);
-  }
-
-  if (settings.espIp) {
-    const normalizedIp = settings.espIp.replace(/^https?:\/\//, '').replace(/\/$/, '');
-    candidates.push(`http://${normalizedIp}/status`);
-    candidates.push(`http://${normalizedIp}/sensor`);
-  }
-
-  const currentOrigin = window.location.origin;
-  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
-    candidates.push(`${currentOrigin}/status`);
-    candidates.push(`${currentOrigin}/sensor`);
-  }
-
-  const currentHost = window.location.hostname;
-  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
-    candidates.push(`http://${currentHost}/status`);
-    candidates.push(`http://${currentHost}/sensor`);
-  }
-
-  candidates.push('http://esp8266.local/status');
-  candidates.push('http://esp8266.local/sensor');
-
   return [...new Set(candidates)];
 }
 
@@ -694,12 +960,20 @@ function setDeviceState(device, state) {
 
   if (device === 'luz') {
     currentLuzState = normalized;
-    if (estadoLuzEl) estadoLuzEl.textContent = normalized ? 'ON' : 'OFF';
+    if (estadoLuzEl) {
+      estadoLuzEl.textContent = normalized ? 'ON' : 'OFF';
+      setDeviceStateClass(estadoLuzEl, normalized);
+    }
+    updateAutoConfigSummary();
     return;
   }
 
   currentBombaState = normalized;
-  if (estadoBombaEl) estadoBombaEl.textContent = normalized ? 'ON' : 'OFF';
+  if (estadoBombaEl) {
+    estadoBombaEl.textContent = normalized ? 'ON' : 'OFF';
+    setDeviceStateClass(estadoBombaEl, normalized);
+  }
+  updateAutoConfigSummary();
 }
 
 function applyLastKnownActuatorState() {
@@ -766,15 +1040,6 @@ function applyAutoSettingsFromStatus(data) {
     changed = true;
   }
 
-  if (data.humThreshold !== undefined) {
-    const thresholdValue = String(data.humThreshold);
-    if (settings.humThreshold !== thresholdValue) {
-      settings.humThreshold = thresholdValue;
-      safeStorageSet(window.localStorage, 'humThreshold', settings.humThreshold);
-      changed = true;
-    }
-  }
-
   if (data.pumpOnMinutes !== undefined) {
     const onValue = String(data.pumpOnMinutes);
     if (settings.pumpOnMinutes !== onValue) {
@@ -796,6 +1061,8 @@ function applyAutoSettingsFromStatus(data) {
 
   if (changed) {
     applySettingsToUI();
+  } else {
+    updateAutoConfigSummary();
   }
 }
 
@@ -809,6 +1076,13 @@ async function sendManualCommand(device, action) {
 }
 
 function connectToBroker() {
+  enforceFixedMqttSettings();
+
+  if (!activeDeviceId()) {
+    if (mqttStatusEl) mqttStatusEl.textContent = 'Primero autentica tu usuario de placa';
+    return;
+  }
+
   if (!settings.mqttHost) {
     if (mqttStatusEl) mqttStatusEl.textContent = 'Ingresa el broker MQTT';
     return;
@@ -857,24 +1131,35 @@ function onConnectSuccess() {
   mqttConnected = true;
   if (mqttStatusEl) mqttStatusEl.textContent = 'Conectado al broker';
   if (connStatusEl) connStatusEl.textContent = 'Conectado por MQTT';
-  mqttClient.subscribe('hidroponia/telemetry');
-  mqttClient.subscribe('hidroponia/commands/luz');
-  mqttClient.subscribe('hidroponia/commands/bomba');
-  mqttClient.subscribe(MODE_SCHEDULE_SYNC_TOPIC);
+  updateConnectionIndicators();
+  const telemetry = telemetryTopic();
+  const luzTopic = commandTopic('luz');
+  const bombaTopic = commandTopic('bomba');
+  const syncTopic = modeScheduleTopic();
+  if (!telemetry || !luzTopic || !bombaTopic || !syncTopic) {
+    if (mqttStatusEl) mqttStatusEl.textContent = 'Falta autenticar placa para subscribir';
+    return;
+  }
+  mqttClient.subscribe(telemetry);
+  mqttClient.subscribe(luzTopic);
+  mqttClient.subscribe(bombaTopic);
+  mqttClient.subscribe(syncTopic);
 
-  // Fuerza un snapshot inicial para evitar mostrar OFF por defecto tras recargar.
-  void fetchStatus(true);
+  // Solicita estado inmediato al ESP para refrescar ON/OFF y horarios al abrir.
+  requestStatusSnapshot();
 }
 
 function onConnectFailure(error) {
   mqttConnected = false;
   if (mqttStatusEl) mqttStatusEl.textContent = `Error al conectar: ${error.errorMessage || 'desconocido'}`;
+  updateConnectionIndicators();
 }
 
 function onConnectionLost(responseObject) {
   mqttConnected = false;
   if (mqttStatusEl) mqttStatusEl.textContent = 'Se perdió la conexión';
   if (connStatusEl) connStatusEl.textContent = 'Sin conexión';
+  updateConnectionIndicators();
   if (responseObject.errorCode !== 0) {
     console.warn('Conexión MQTT perdida:', responseObject.errorMessage);
   }
@@ -885,10 +1170,22 @@ function onMessageArrived(message) {
     const payload = message.payloadString;
     const topic = message.destinationName;
 
-    if (topic === 'hidroponia/telemetry') {
+    const telemetry = telemetryTopic();
+    const luzTopic = commandTopic('luz');
+    const bombaTopic = commandTopic('bomba');
+    const syncTopic = modeScheduleTopic();
+
+    if (telemetry && topic === telemetry) {
+      if (statusFallbackTimer) {
+        clearTimeout(statusFallbackTimer);
+        statusFallbackTimer = null;
+      }
+
       const data = JSON.parse(payload);
       lastTelemetry = data;
       lastTelemetryAt = Date.now();
+      statusRequestInFlight = false;
+      lastTelemetrySource = 'MQTT';
       applyAutoSettingsFromStatus(data);
       if (data.temp !== null && data.temp !== undefined) {
         tempEl.textContent = `${data.temp}°C`;
@@ -898,12 +1195,13 @@ function onMessageArrived(message) {
       }
       updatePhDisplay(data.ph);
       applyActuatorStatesFromPayload(data);
-      mqttStatusEl.textContent = 'Datos recibidos del broker';
-      connStatusEl.textContent = 'Conectado por MQTT';
+      if (mqttStatusEl) mqttStatusEl.textContent = 'Datos recibidos del broker';
+      if (connStatusEl) connStatusEl.textContent = 'Conectado por MQTT';
+      updateLastUpdateElapsed();
       return;
     }
 
-    if (topic === 'hidroponia/commands/luz') {
+    if (luzTopic && topic === luzTopic) {
       const luzState = normalizeBoolean(payload);
       if (luzState !== null) {
         setDeviceState('luz', luzState);
@@ -912,7 +1210,7 @@ function onMessageArrived(message) {
       }
     }
 
-    if (topic === 'hidroponia/commands/bomba') {
+    if (bombaTopic && topic === bombaTopic) {
       const bombaState = normalizeBoolean(payload);
       if (bombaState !== null) {
         setDeviceState('bomba', bombaState);
@@ -921,7 +1219,7 @@ function onMessageArrived(message) {
       }
     }
 
-    if (topic === MODE_SCHEDULE_SYNC_TOPIC) {
+    if (syncTopic && topic === syncTopic) {
       const syncPayload = JSON.parse(payload);
       if (syncPayload?.type !== 'mode-schedule-updated' || syncPayload?.source === settingsSyncId) {
         return;
@@ -934,7 +1232,6 @@ function onMessageArrived(message) {
       if (typeof data.lightsEnd === 'string') settings.lightsEnd = data.lightsEnd;
       if (data.pumpOnMinutes !== undefined) settings.pumpOnMinutes = String(data.pumpOnMinutes);
       if (data.pumpOffMinutes !== undefined) settings.pumpOffMinutes = String(data.pumpOffMinutes);
-      if (data.humThreshold !== undefined) settings.humThreshold = String(data.humThreshold);
 
       safeStorageSet(window.localStorage, 'modoAuto', String(settings.modoAuto));
       safeStorageSet(window.localStorage, 'epoca', settings.epoca);
@@ -942,7 +1239,6 @@ function onMessageArrived(message) {
       safeStorageSet(window.localStorage, 'lightsEnd', settings.lightsEnd);
       safeStorageSet(window.localStorage, 'pumpOnMinutes', settings.pumpOnMinutes);
       safeStorageSet(window.localStorage, 'pumpOffMinutes', settings.pumpOffMinutes);
-      safeStorageSet(window.localStorage, 'humThreshold', settings.humThreshold);
       safeStorageSet(window.localStorage, 'pumpInterval', settings.pumpOnMinutes);
 
       applySettingsToUI();
@@ -962,8 +1258,9 @@ async function sendCommand(device, action) {
   let mqttSent = false;
 
   if (mqttConnected && mqttClient) {
-    const topic = device === 'luz' ? 'hidroponia/commands/luz' : 'hidroponia/commands/bomba';
+    const topic = commandTopic(device);
     try {
+      if (!topic) throw new Error('Falta deviceId para comando MQTT');
       mqttClient.send(topic, normalizedAction);
       mqttSent = true;
       mqttStatusEl.textContent = `Comando enviado: ${device} ${normalizedAction}`;
@@ -983,7 +1280,7 @@ async function sendCommand(device, action) {
     return;
   }
 
-  const url = `${base}/${device}/${normalizedAction.toLowerCase()}`;
+  const url = withAuthUrl(`${base}/${device}/${normalizedAction.toLowerCase()}`);
   try {
     const res = await fetch(url, { method: 'GET' });
     if (!res.ok) throw new Error('error en petición');
@@ -1029,7 +1326,7 @@ if (bombaOffBtn) {
 
 async function fetchStatus(forceHttp = false) {
   if (mqttConnected && !forceHttp) {
-    const telemetryFresh = Boolean(lastTelemetry) && (Date.now() - lastTelemetryAt) <= 15000;
+    const telemetryFresh = isTelemetryFresh(15000);
     if (telemetryFresh) {
       applyActuatorStatesFromPayload(lastTelemetry);
       if (connStatusEl) connStatusEl.textContent = 'Conectado por MQTT';
@@ -1044,7 +1341,7 @@ async function fetchStatus(forceHttp = false) {
 
   for (const url of statusCandidates) {
     try {
-      const res = await fetch(url, { cache: 'no-store' });
+      const res = await fetch(withAuthUrl(url), { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       const data = await res.json();
@@ -1054,6 +1351,7 @@ async function fetchStatus(forceHttp = false) {
 
       lastTelemetry = data;
       lastTelemetryAt = Date.now();
+      lastTelemetrySource = 'HTTP';
 
       if (data.serverTime && serverTimeEl) {
         serverTimeEl.textContent = data.serverTime;
@@ -1081,6 +1379,8 @@ async function fetchStatus(forceHttp = false) {
 
       applyActuatorStatesFromPayload(data);
       if (connStatusEl) connStatusEl.textContent = `Conectado (${data.serverTime || 'sin hora'})`;
+      statusRequestInFlight = false;
+      updateLastUpdateElapsed();
       return data;
     } catch (err) {
       lastError = err;
@@ -1091,21 +1391,36 @@ async function fetchStatus(forceHttp = false) {
   if (tempEl) tempEl.textContent = 'Error de datos';
   if (humEl) humEl.textContent = 'Error de datos';
   updatePhDisplay(null);
+  statusRequestInFlight = false;
+  updateLastUpdateElapsed();
   console.warn('No se pudo obtener estado del ESP:', lastError);
   return null;
 }
 
 function requestStatusSnapshot() {
+  const now = Date.now();
+  if (statusRequestInFlight) return;
+  if (now - lastStatusRequestAt < STATUS_MIN_REQUEST_GAP_MS) return;
+  if (mqttConnected && isTelemetryFresh()) return;
+
+  lastStatusRequestAt = now;
+  statusRequestInFlight = true;
+
   if (mqttConnected && mqttClient) {
     try {
-      mqttClient.send(ESP_STATUS_REQUEST_TOPIC, 'now');
+      const topic = statusRequestTopic();
+      if (!topic) throw new Error('Falta deviceId para pedir estado por MQTT');
+      mqttClient.send(topic, 'now');
+      scheduleStatusHttpFallback();
       return;
     } catch (err) {
       console.warn('No se pudo solicitar estado por MQTT, intento HTTP:', err);
     }
   }
 
-  void fetchStatus(true);
+  void fetchStatus(true).finally(() => {
+    statusRequestInFlight = false;
+  });
 }
 
 async function automaticControl() {
@@ -1118,14 +1433,12 @@ async function automaticControl() {
   const data = mqttConnected ? lastTelemetry : await fetchStatus();
   if (!data) return;
 
-  const hum = Number(data.hum);
-  const threshold = Number(settings.humThreshold);
   const argentinaTime = getCurrentArgentinaTime();
   const scheduleNow = {
     getHours: () => argentinaTime.hh,
     getMinutes: () => argentinaTime.mm
   };
-  const shouldPump = Number.isFinite(hum) && Number.isFinite(threshold) && hum < threshold;
+  const shouldPump = true;
   const shouldLightsBeOn = autoLogic?.shouldTurnLightsOn(scheduleNow, settings.lightsStart, settings.lightsEnd) || false;
 
   if (settings.lightsStart && settings.lightsEnd) {
@@ -1171,6 +1484,8 @@ async function automaticControl() {
 }
 
 applySettingsToUI();
+setActuatorStatePending();
+updateLastUpdateElapsed();
 
 if (saveSettingsBtn) {
   saveSettingsBtn.addEventListener('click', () => {
@@ -1199,6 +1514,12 @@ if (connectBrokerBtn) {
 
 if (disconnectBrokerBtn) {
   disconnectBrokerBtn.addEventListener('click', disconnectBroker);
+}
+
+if (loginBoardBtn) {
+  loginBoardBtn.addEventListener('click', () => {
+    void loginBoardAccount();
+  });
 }
 
 if (modeSelectEl) {
@@ -1254,7 +1575,7 @@ if (epocaSelect) {
   });
 }
 
-const autoSettingsInputs = [espIpEl, mqttHostEl, mqttPortEl, mqttUserEl, mqttPasswordEl, epocaSelect, humThresholdEl, lightsStartEl, lightsEndEl, pumpOnMinutesEl, pumpOffMinutesEl].filter(Boolean);
+const autoSettingsInputs = [espIpEl, appUserEl, appPasswordEl, epocaSelect, lightsStartEl, lightsEndEl, pumpOnMinutesEl, pumpOffMinutesEl].filter(Boolean);
 autoSettingsInputs.forEach((element) => {
   element.addEventListener('input', () => {
     syncSettingsFromInputs();
@@ -1266,7 +1587,15 @@ autoSettingsInputs.forEach((element) => {
 
 initSettingsSync();
 
-setInterval(requestStatusSnapshot, 1000);
+scheduleStatusPolling();
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    scheduleStatusPolling();
+  });
+}
+
+setInterval(updateLastUpdateElapsed, 1000);
 setInterval(async () => {
   try {
     const serverTime = await fetchServerTime();
@@ -1280,7 +1609,7 @@ setInterval(async () => {
     const now = new Date();
     serverTimeEl.textContent = now.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
-}, 1000);
+}, SERVER_TIME_SYNC_INTERVAL_MS);
 
 void initialStatusBootstrap();
 if (settings.mqttHost) {
