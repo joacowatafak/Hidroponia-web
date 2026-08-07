@@ -32,11 +32,12 @@
 
         <div class="section-block">
             <div class="card">
-                <h2>📊 Estado actual</h2>
+                <h2 id="currentStatusTitle">📊 Estado actual</h2>
                 <div class="summary-row">
                     <div class="status-item compact-summary">
                         <h3>🕒 Hora</h3>
                         <p id="serverTime">--:--</p>
+                        <p id="serverTimeSource" class="time-source">Hora ESP</p>
                     </div>
                     <div class="status-item compact-summary">
                         <h3>🌡️ Temp</h3>
@@ -68,10 +69,10 @@
                 </div>
             </div>
             <div class="card">
-                <h2>⚙️ Modo y horarios</h2>
+                <h2 id="modeScheduleTitle">⚙️ Modo y horarios</h2>
                 <div class="row">
                     <div class="mode-control">
-                        <span class="mode-control-title">Modo:</span>
+                        <span class="mode-control-title" id="modeLabel">Modo:</span>
                         <div class="mode-toggle-row">
                             <button id="modeManualBtn" type="button">Manual</button>
                             <button id="modeAutoBtn" type="button">Automático</button>
@@ -79,7 +80,7 @@
                     </div>
                 </div>
                 <div class="row">
-                    <label>Estación:
+                    <label id="seasonLabel">Estación:
                         <select id="epocaSelect">
                             <option value="primavera">Primavera</option>
                             <option value="verano">Verano</option>
@@ -89,11 +90,11 @@
                         </select>
                     </label>
                 </div>
-                <label>Inicio luces: <input type="time" id="lightsStart"></label>
-                <label>Fin luces: <input type="time" id="lightsEnd"></label>
+                <label id="lightsStartLabel">Inicio luces: <input type="time" id="lightsStart"></label>
+                <label id="lightsEndLabel">Fin luces: <input type="time" id="lightsEnd"></label>
                 <div class="row">
-                    <label>Bomba: min encendida <input type="number" id="pumpOnMinutes" min="1" value="2"></label>
-                    <label>Bomba: min apagada <input type="number" id="pumpOffMinutes" min="1" value="10"></label>
+                    <label id="pumpOnLabel">Bomba: min encendida <input type="number" id="pumpOnMinutes" min="1" value="2"></label>
+                    <label id="pumpOffLabel">Bomba: min apagada <input type="number" id="pumpOffMinutes" min="1" value="10"></label>
                 </div>
                 <div class="row">
                     <button id="saveParams">Guardar</button>
@@ -114,7 +115,7 @@
         </div>
     </div>
 
-    <script src="autoLogic.js"></script>
-    <script src="script.js"></script>
+    <script src="autoLogic.js?v=20260807-3"></script>
+    <script src="script.js?v=20260807-3"></script>
 </body>
 </html>

@@ -25,11 +25,29 @@
                 <p>ID de placa: <strong id="deviceIdDisplay">--</strong></p>
                 <p id="connStatus">Sin conexión</p>
             </div>
+                <div class="card">
+                    <h2 id="settingsCardTitle">⚙️ Ajustes</h2>
+                    <div class="row">
+                        <label id="manualClockLabel">Hora del ESP8266:
+                            <input type="time" id="manualClockTime" step="1">
+                        </label>
+                        <label id="languageLabel">Idioma:
+                            <select id="languageSelect">
+                                <option value="es">Español</option>
+                                <option value="en">English</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="row">
+                        <button id="saveSettings">Guardar ajustes</button>
+                    </div>
+                    <p class="settings-note" id="settingsNote">Escribe la hora actual y el ESP8266 la guardará para su reloj interno.</p>
+                </div>
         </div>
 
     </div>
 
-    <script src="autoLogic.js"></script>
-    <script src="script.js"></script>
+    <script src="autoLogic.js?v=20260807-3"></script>
+    <script src="script.js?v=20260807-3"></script>
 </body>
 </html>

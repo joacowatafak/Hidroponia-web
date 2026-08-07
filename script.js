@@ -27,13 +27,16 @@ const modeAutoBtn = document.getElementById('modeAutoBtn');
 const modoAutoEl = document.getElementById('modoAuto');
 const epocaSelect = document.getElementById('epocaSelect');
 const espIpEl = document.getElementById('espIp');
-const saveSettingsBtn = document.getElementById('saveSettings');
 const connStatusEl = document.getElementById('connStatus');
 const tempEl = document.getElementById('temp');
 const humEl = document.getElementById('hum');
 const phEl = document.getElementById('ph');
 const phRangeStatusEl = document.getElementById('phRangeStatus');
 const serverTimeEl = document.getElementById('serverTime');
+const serverTimeSourceEl = document.getElementById('serverTimeSource');
+const manualClockTimeEl = document.getElementById('manualClockTime');
+const languageSelectEl = document.getElementById('languageSelect');
+const saveSettingsBtn = document.getElementById('saveSettings');
 const lightsStartEl = document.getElementById('lightsStart');
 const lightsEndEl = document.getElementById('lightsEnd');
 const pumpOnMinutesEl = document.getElementById('pumpOnMinutes');
@@ -69,7 +72,8 @@ const STATUS_POLL_INTERVAL_ACTIVE_MS = 1000;
 const STATUS_POLL_INTERVAL_HIDDEN_MS = 5000;
 const STATUS_MIN_REQUEST_GAP_MS = 200;
 const TELEMETRY_FRESH_MS = 30000;
-const SERVER_TIME_SYNC_INTERVAL_MS = 15000;
+const SERVER_TIME_SYNC_INTERVAL_MS = 1000;
+const SERVER_TIME_REMOTE_SYNC_MS = 1000;
 const COMMAND_ACK_TIMEOUT_MS = 3500;
 const FIXED_MQTT_HOST = 'af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud';
 const FIXED_MQTT_PORT = '8884';
@@ -110,6 +114,8 @@ let settings = {
   appUser: readScopedSetting('appUser', ''),
   appPassword: readScopedSetting('appPassword', ''),
   deviceId: readScopedSetting('deviceId', ''),
+  manualClockTime: readScopedSetting('manualClockTime', ''),
+  uiLanguage: readScopedSetting('uiLanguage', 'es'),
   modoAuto: readScopedSetting('modoAuto', 'false') === 'true',
   epoca: readScopedSetting('epoca', 'primavera'),
   lightsStart: readScopedSetting('lightsStart', ''),
@@ -124,6 +130,194 @@ function normalizeDeviceId(value) {
   if (raw.startsWith('esp8266-')) return raw;
   if (/^[0-9a-f]{6,8}$/i.test(raw)) return `esp8266-${raw}`;
   return raw;
+}
+
+const UI_TEXTS = {
+  es: {
+    title: 'HIDROWEB',
+    subtitle: 'Control inteligente de tu hidroponía',
+    currentStatus: '📊 Estado actual',
+    modeSchedule: '⚙️ Modo y horarios',
+    settings: '⚙️ Ajustes',
+    modeLabel: 'Modo:',
+    seasonLabel: 'Estación:',
+    lightsStart: 'Inicio luces:',
+    lightsEnd: 'Fin luces:',
+    pumpOn: 'Bomba: min encendida',
+    pumpOff: 'Bomba: min apagada',
+    manualClock: 'Hora del ESP8266:',
+    language: 'Idioma:',
+    saveSettings: 'Guardar ajustes',
+    settingsNote: 'La zona horaria se usa para enviar la hora correcta al ESP8266 y para mostrar el reloj de la web.',
+    manual: 'Manual',
+    automatic: 'Automático',
+    save: 'Guardar',
+    clear: 'Limpiar',
+    hourSourceEsp: 'Hora ESP',
+    hourSourceFallback: 'Sin ESP, usando respaldo',
+    seasonOptions: {
+      primavera: 'Primavera',
+      verano: 'Verano',
+      otonio: 'Otoño',
+      invierno: 'Invierno',
+      personalizado: 'Personalizado'
+    }
+  },
+  en: {
+    title: 'HIDROWEB',
+    subtitle: 'Smart control for your hydroponics',
+    currentStatus: '📊 Current status',
+    modeSchedule: '⚙️ Mode and schedules',
+    settings: '⚙️ Settings',
+    modeLabel: 'Mode:',
+    seasonLabel: 'Season:',
+    lightsStart: 'Lights start:',
+    lightsEnd: 'Lights end:',
+    pumpOn: 'Pump: ON minutes',
+    pumpOff: 'Pump: OFF minutes',
+    manualClock: 'ESP8266 time:',
+    language: 'Language:',
+    saveSettings: 'Save settings',
+    settingsNote: 'The time zone is used to send the correct time to the ESP8266 and to show the web clock.',
+    manual: 'Manual',
+    automatic: 'Automatic',
+    save: 'Save',
+    clear: 'Clear',
+    hourSourceEsp: 'ESP time',
+    hourSourceFallback: 'No ESP, using fallback',
+    seasonOptions: {
+      primavera: 'Spring',
+      verano: 'Summer',
+      otonio: 'Autumn',
+      invierno: 'Winter',
+      personalizado: 'Custom'
+    }
+  }
+};
+
+const TIME_ZONE_OPTIONS = {
+  es: {
+    'America/Argentina/Buenos_Aires': 'Argentina - Buenos Aires',
+    'America/Argentina/Cordoba': 'Argentina - Córdoba',
+    'America/Argentina/Jujuy': 'Argentina - Jujuy',
+    'America/Argentina/Ushuaia': 'Argentina - Ushuaia',
+    'America/Montevideo': 'Uruguay - Montevideo',
+    'America/Santiago': 'Chile - Santiago',
+    'Europe/Madrid': 'España - Madrid',
+    UTC: 'UTC'
+  },
+  en: {
+    'America/Argentina/Buenos_Aires': 'Argentina - Buenos Aires',
+    'America/Argentina/Cordoba': 'Argentina - Cordoba',
+    'America/Argentina/Jujuy': 'Argentina - Jujuy',
+    'America/Argentina/Ushuaia': 'Argentina - Ushuaia',
+    'America/Montevideo': 'Uruguay - Montevideo',
+    'America/Santiago': 'Chile - Santiago',
+    'Europe/Madrid': 'Spain - Madrid',
+    UTC: 'UTC'
+  }
+};
+
+function getUiTexts() {
+  return UI_TEXTS[settings.uiLanguage] || UI_TEXTS.es;
+}
+
+function getCurrentSelectedTime() {
+  const now = new Date();
+  return {
+    hh: now.getHours(),
+    mm: now.getMinutes(),
+    ss: now.getSeconds()
+  };
+}
+
+function parseClockTime(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+
+  const parts = text.split(':');
+  if (parts.length < 2) return null;
+
+  const hh = Number(parts[0]);
+  const mm = Number(parts[1]);
+  const ss = parts.length >= 3 ? Number(parts[2]) : 0;
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || !Number.isFinite(ss)) return null;
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return null;
+
+  return { hh, mm, ss };
+}
+
+function getManualClockTime() {
+  const directValue = manualClockTimeEl?.value || settings.manualClockTime || '';
+  const parsed = parseClockTime(directValue);
+  if (parsed) return parsed;
+  return getCurrentSelectedTime();
+}
+
+function applyLanguageToUI() {
+  const texts = getUiTexts();
+  document.documentElement.lang = settings.uiLanguage === 'en' ? 'en' : 'es';
+
+  const titleEl = document.querySelector('.hero-title h1');
+  const subtitleEl = document.querySelector('.hero-subtitle');
+  const currentStatusTitleEl = document.getElementById('currentStatusTitle');
+  const modeScheduleTitleEl = document.getElementById('modeScheduleTitle');
+  const settingsCardTitleEl = document.getElementById('settingsCardTitle');
+  const modeLabelEl = document.getElementById('modeLabel');
+  const seasonLabelEl = document.getElementById('seasonLabel');
+  const lightsStartLabelEl = document.getElementById('lightsStartLabel');
+  const lightsEndLabelEl = document.getElementById('lightsEndLabel');
+  const pumpOnLabelEl = document.getElementById('pumpOnLabel');
+  const pumpOffLabelEl = document.getElementById('pumpOffLabel');
+  const manualClockLabelEl = document.getElementById('manualClockLabel');
+  const languageLabelEl = document.getElementById('languageLabel');
+  const settingsNoteEl = document.getElementById('settingsNote');
+
+  if (titleEl) titleEl.textContent = texts.title;
+  if (subtitleEl) subtitleEl.textContent = texts.subtitle;
+  if (currentStatusTitleEl) currentStatusTitleEl.textContent = texts.currentStatus;
+  if (modeScheduleTitleEl) modeScheduleTitleEl.textContent = texts.modeSchedule;
+  if (settingsCardTitleEl) settingsCardTitleEl.textContent = texts.settings;
+  if (modeLabelEl) modeLabelEl.textContent = texts.modeLabel;
+  if (seasonLabelEl) seasonLabelEl.childNodes[0].textContent = texts.seasonLabel + ' ';
+  if (lightsStartLabelEl) lightsStartLabelEl.childNodes[0].textContent = texts.lightsStart + ' ';
+  if (lightsEndLabelEl) lightsEndLabelEl.childNodes[0].textContent = texts.lightsEnd + ' ';
+  if (pumpOnLabelEl) pumpOnLabelEl.childNodes[0].textContent = texts.pumpOn + ' ';
+  if (pumpOffLabelEl) pumpOffLabelEl.childNodes[0].textContent = texts.pumpOff + ' ';
+  if (manualClockLabelEl) manualClockLabelEl.childNodes[0].textContent = texts.manualClock + ' ';
+  if (languageLabelEl) languageLabelEl.childNodes[0].textContent = texts.language + ' ';
+  if (settingsNoteEl) settingsNoteEl.textContent = texts.settingsNote;
+
+  const manualBtnText = document.getElementById('modeManualBtn');
+  const autoBtnText = document.getElementById('modeAutoBtn');
+  const saveParamsBtnText = document.getElementById('saveParams');
+  const clearParamsBtnText = document.getElementById('clearParams');
+  const saveSettingsBtnText = document.getElementById('saveSettings');
+
+  if (manualBtnText) manualBtnText.textContent = texts.manual;
+  if (autoBtnText) autoBtnText.textContent = texts.automatic;
+  if (saveParamsBtnText) saveParamsBtnText.textContent = texts.save;
+  if (clearParamsBtnText) clearParamsBtnText.textContent = texts.clear;
+  if (saveSettingsBtnText) saveSettingsBtnText.textContent = texts.saveSettings;
+
+  const seasonOptions = texts.seasonOptions;
+  if (epocaSelect) {
+    for (const option of epocaSelect.options) {
+      if (seasonOptions[option.value]) {
+        option.textContent = seasonOptions[option.value];
+      }
+    }
+  }
+
+  if (serverTimeSourceEl) {
+    if (lastKnownEspTimeSource === 'esp') {
+      serverTimeSourceEl.textContent = texts.hourSourceEsp;
+      serverTimeSourceEl.classList.remove('fallback');
+    } else {
+      serverTimeSourceEl.textContent = texts.hourSourceFallback;
+      serverTimeSourceEl.classList.add('fallback');
+    }
+  }
 }
 
 settings.deviceId = normalizeDeviceId(settings.deviceId);
@@ -156,6 +350,11 @@ let statusRequestInFlight = false;
 let lastStatusRequestAt = 0;
 let pendingCommandAckTimer = null;
 let telemetryWaitTimer = null;
+let serverTimeSyncInFlight = false;
+let lastServerTimeSyncMs = 0;
+let lastKnownEspTime = '--:--';
+let lastKnownEspTimeSource = 'fallback';
+let autoConfigDirty = false;
 
 const autoLogic = window.AutoLogic;
 
@@ -724,6 +923,7 @@ function broadcastSettingsUpdate() {
       epoca: settings.epoca,
       lightsStart: settings.lightsStart,
       lightsEnd: settings.lightsEnd,
+      custom: 'Hora personalizada (otros países)',
       pumpOnMinutes: settings.pumpOnMinutes,
       pumpOffMinutes: settings.pumpOffMinutes
     }
@@ -734,25 +934,6 @@ function broadcastSettingsUpdate() {
   } catch (err) {
     console.warn('No se pudo sincronizar modo y horarios:', err);
   }
-}
-
-function getCurrentArgentinaTime() {
-  const now = new Date();
-  const formatter = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Argentina/Buenos_Aires',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  });
-
-  const parts = formatter.formatToParts(now);
-  const hourPart = parts.find((part) => part.type === 'hour');
-  const minutePart = parts.find((part) => part.type === 'minute');
-
-  return {
-    hh: Number(hourPart?.value || 0),
-    mm: Number(minutePart?.value || 0)
-  };
 }
 
 function getSeasonPresetSchedule(epoca) {
@@ -822,10 +1003,13 @@ function applySettingsToUI() {
   if (modeSelectEl) modeSelectEl.value = settings.modoAuto ? 'auto' : 'manual';
   if (modoAutoEl) modoAutoEl.checked = settings.modoAuto;
   if (epocaSelect) epocaSelect.value = settings.epoca || 'personalizado';
+    if (manualClockTimeEl) manualClockTimeEl.value = settings.manualClockTime || '';
+  if (languageSelectEl) languageSelectEl.value = settings.uiLanguage || 'es';
   if (lightsStartEl) lightsStartEl.value = settings.lightsStart || '08:00';
   if (lightsEndEl) lightsEndEl.value = settings.lightsEnd || '20:00';
   if (pumpOnMinutesEl) pumpOnMinutesEl.value = settings.pumpOnMinutes || '2';
   if (pumpOffMinutesEl) pumpOffMinutesEl.value = settings.pumpOffMinutes || '10';
+  applyLanguageToUI();
   updateModeButtonsVisualState();
   if (epocaSelect && epocaSelect.value !== 'personalizado') {
     applySeasonScheduleToInputs();
@@ -843,6 +1027,8 @@ function syncSettingsFromInputs() {
   if (appUserEl) settings.appUser = appUserEl.value.trim();
   if (appPasswordEl) settings.appPassword = appPasswordEl.value.trim();
   if (deviceIdInputEl) settings.deviceId = normalizeDeviceId(deviceIdInputEl.value);
+    if (manualClockTimeEl) settings.manualClockTime = manualClockTimeEl.value.trim() || '';
+  if (languageSelectEl) settings.uiLanguage = languageSelectEl.value || 'es';
   if (modeSelectEl) {
     settings.modoAuto = modeSelectEl.value === 'auto';
   } else if (modeManualBtn && modeAutoBtn) {
@@ -860,6 +1046,8 @@ function syncSettingsFromInputs() {
   safeStorageSet(window.localStorage, 'appUser', settings.appUser);
   safeStorageSet(window.localStorage, 'appPassword', settings.appPassword);
   safeStorageSet(window.localStorage, 'deviceId', normalizeDeviceId(settings.deviceId));
+  safeStorageSet(window.localStorage, 'manualClockTime', settings.manualClockTime || '');
+  safeStorageSet(window.localStorage, 'uiLanguage', settings.uiLanguage || 'es');
   safeStorageSet(window.localStorage, 'modoAuto', String(settings.modoAuto));
   safeStorageSet(window.localStorage, 'epoca', settings.epoca);
   safeStorageSet(window.localStorage, 'lightsStart', settings.lightsStart);
@@ -921,20 +1109,20 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
   const params = new URLSearchParams();
 
   if (resetAuto) {
-    const argentinaTime = getCurrentArgentinaTime();
+    const currentTime = getManualClockTime();
     params.set('resetAuto', '1');
-    params.set('currentTime', `${String(argentinaTime.hh).padStart(2, '0')}:${String(argentinaTime.mm).padStart(2, '0')}`);
+    params.set('currentTime', `${String(currentTime.hh).padStart(2, '0')}:${String(currentTime.mm).padStart(2, '0')}:${String(currentTime.ss).padStart(2, '0')}`);
   }
 
   if (includeAutomationSettings) {
-    const argentinaTime = getCurrentArgentinaTime();
+    const currentTime = getManualClockTime();
     params.set('mode', settings.modoAuto ? '1' : '0');
     params.set('lightsStart', settings.lightsStart || '08:00');
     params.set('lightsEnd', settings.lightsEnd || '20:00');
     params.set('pumpOnMinutes', String(settings.pumpOnMinutes || 2));
     params.set('pumpOffMinutes', String(settings.pumpOffMinutes || 10));
     params.set('epoca', settings.epoca || 'personalizado');
-    params.set('currentTime', `${String(argentinaTime.hh).padStart(2, '0')}:${String(argentinaTime.mm).padStart(2, '0')}`);
+    params.set('currentTime', `${String(currentTime.hh).padStart(2, '0')}:${String(currentTime.mm).padStart(2, '0')}:${String(currentTime.ss).padStart(2, '0')}`);
   }
 
   if (settings.appUser && settings.appPassword) {
@@ -1055,6 +1243,7 @@ async function saveSettings(includeAutomationSettings = true) {
       showActionFeedback('No se pudo guardar en el ESP', 'error');
       return;
     }
+    autoConfigDirty = false;
   } else {
     if (connStatusEl) connStatusEl.textContent = 'Ajustes de conexion guardados';
     if (mqttStatusEl) mqttStatusEl.textContent = 'Ajustes de conexion guardados';
@@ -1083,6 +1272,8 @@ async function clearAutoSettings() {
     showActionFeedback('No se pudo limpiar en el ESP', 'error');
     return;
   }
+
+  autoConfigDirty = false;
 
   broadcastSettingsUpdate();
 
@@ -1162,7 +1353,7 @@ function getStatusUrlCandidates() {
 async function fetchServerTime() {
   for (const url of getTimeUrlCandidates()) {
     try {
-      const res = await fetch(url, { cache: 'no-store' });
+      const res = await fetch(withAuthUrl(url), { cache: 'no-store' });
       if (!res.ok) continue;
 
       const data = await res.json();
@@ -1174,7 +1365,67 @@ async function fetchServerTime() {
     }
   }
 
-  return null;
+  return getLocalTimeString();
+}
+
+function getLocalTimeString() {
+  const currentTime = getCurrentSelectedTime();
+  return `${String(currentTime.hh).padStart(2, '0')}:${String(currentTime.mm).padStart(2, '0')}:${String(currentTime.ss).padStart(2, '0')}`;
+}
+
+function setServerTimeSource(source) {
+  lastKnownEspTimeSource = source === 'esp' ? 'esp' : 'fallback';
+  if (!serverTimeSourceEl) return;
+  const texts = getUiTexts();
+
+  if (lastKnownEspTimeSource === 'esp') {
+    serverTimeSourceEl.textContent = texts.hourSourceEsp;
+    serverTimeSourceEl.classList.remove('fallback');
+  } else {
+    serverTimeSourceEl.textContent = texts.hourSourceFallback;
+    serverTimeSourceEl.classList.add('fallback');
+  }
+}
+
+async function refreshDisplayedTime() {
+  if (!serverTimeEl) return;
+
+  // Show ESP time as source of truth for the dashboard clock.
+  if (!serverTimeEl.textContent || serverTimeEl.textContent.trim() === '' || serverTimeEl.textContent === '--:--') {
+    serverTimeEl.textContent = lastKnownEspTime;
+  }
+
+  const now = Date.now();
+  if (serverTimeSyncInFlight || now - lastServerTimeSyncMs < SERVER_TIME_REMOTE_SYNC_MS) {
+    return;
+  }
+
+  serverTimeSyncInFlight = true;
+  try {
+    const serverTime = await fetchServerTime();
+    if (serverTime) {
+      lastKnownEspTime = serverTime;
+      serverTimeEl.textContent = serverTime;
+      setServerTimeSource(serverTime === getLocalTimeString() ? 'fallback' : 'esp');
+    } else if (lastKnownEspTime) {
+      serverTimeEl.textContent = lastKnownEspTime;
+      setServerTimeSource('fallback');
+    } else {
+      serverTimeEl.textContent = getLocalTimeString();
+      setServerTimeSource('fallback');
+    }
+  } catch (err) {
+    if (lastKnownEspTime) {
+      serverTimeEl.textContent = lastKnownEspTime;
+      setServerTimeSource('fallback');
+    } else {
+      serverTimeEl.textContent = getLocalTimeString();
+      setServerTimeSource('fallback');
+    }
+  } finally {
+    lastServerTimeSyncMs = Date.now();
+    serverTimeSyncInFlight = false;
+  }
 }
 
 function normalizeBoolean(value) {
@@ -1286,6 +1537,10 @@ function applyActuatorStatesFromPayload(data) {
 
 function applyAutoSettingsFromStatus(data) {
   if (!data || typeof data !== 'object') return;
+
+  if (autoConfigDirty) {
+    return;
+  }
 
   let changed = false;
 
@@ -1698,6 +1953,8 @@ function requestStatusSnapshot() {
         return;
       }
       const statusPayload = new URLSearchParams({ request: 'now' });
+      const currentTime = getManualClockTime();
+      statusPayload.set('currentTime', `${String(currentTime.hh).padStart(2, '0')}:${String(currentTime.mm).padStart(2, '0')}:${String(currentTime.ss).padStart(2, '0')}`);
       if (settings.appUser) statusPayload.set('user', settings.appUser);
       if (settings.appPassword) statusPayload.set('pass', settings.appPassword);
       mqttClient.send(topic, statusPayload.toString());
@@ -1720,7 +1977,7 @@ async function automaticControl() {
   const data = mqttConnected ? lastTelemetry : await fetchStatus();
   if (!data) return;
 
-  const argentinaTime = getCurrentArgentinaTime();
+  const argentinaTime = getCurrentSelectedTime();
   const scheduleNow = {
     getHours: () => argentinaTime.hh,
     getMinutes: () => argentinaTime.mm
@@ -1777,10 +2034,23 @@ updateLastUpdateElapsed();
 
 if (saveSettingsBtn) {
   saveSettingsBtn.addEventListener('click', () => {
-    void saveSettings(false);
+    void saveSettings(true);
     if (settings.mqttHost) {
       connectToBroker();
     }
+  });
+}
+
+if (manualClockTimeEl) {
+  manualClockTimeEl.addEventListener('input', () => {
+    syncSettingsFromInputs();
+  });
+}
+
+if (languageSelectEl) {
+  languageSelectEl.addEventListener('change', () => {
+    syncSettingsFromInputs();
+    applySettingsToUI();
   });
 }
 
@@ -1872,9 +2142,15 @@ if (epocaSelect) {
 const autoSettingsInputs = [espIpEl, appUserEl, appPasswordEl, epocaSelect, lightsStartEl, lightsEndEl, pumpOnMinutesEl, pumpOffMinutesEl].filter(Boolean);
 autoSettingsInputs.forEach((element) => {
   element.addEventListener('input', () => {
+    if (element === epocaSelect || element === lightsStartEl || element === lightsEndEl || element === pumpOnMinutesEl || element === pumpOffMinutesEl) {
+      autoConfigDirty = true;
+    }
     syncSettingsFromInputs();
   });
   element.addEventListener('change', () => {
+    if (element === epocaSelect || element === lightsStartEl || element === lightsEndEl || element === pumpOnMinutesEl || element === pumpOffMinutesEl) {
+      autoConfigDirty = true;
+    }
     syncSettingsFromInputs();
   });
 });
@@ -1890,19 +2166,9 @@ if (typeof document !== 'undefined') {
 }
 
 setInterval(updateLastUpdateElapsed, 1000);
-setInterval(async () => {
-  try {
-    const serverTime = await fetchServerTime();
-    if (serverTime) {
-      serverTimeEl.textContent = serverTime;
-    } else {
-      const now = new Date();
-      serverTimeEl.textContent = now.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    }
-  } catch (err) {
-    const now = new Date();
-    serverTimeEl.textContent = now.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  }
+void refreshDisplayedTime();
+setInterval(() => {
+  void refreshDisplayedTime();
 }, SERVER_TIME_SYNC_INTERVAL_MS);
 
 void initialStatusBootstrap();
