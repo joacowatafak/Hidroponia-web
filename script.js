@@ -188,6 +188,10 @@ function activeDeviceId() {
   return normalizeDeviceId(settings.deviceId);
 }
 
+function hasBoardCredentials() {
+  return Boolean(String(settings.appUser || '').trim()) && Boolean(String(settings.appPassword || '').trim());
+}
+
 function mqttTopic(suffix) {
   const deviceId = activeDeviceId();
   if (!deviceId) return null;
@@ -705,6 +709,7 @@ function initSettingsSync() {
 }
 
 function broadcastSettingsUpdate() {
+  if (!hasBoardCredentials()) return;
   if (!mqttClient || !mqttClient.isConnected()) return;
 
   const topic = modeScheduleTopic();
@@ -941,6 +946,9 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
   let mqttDispatched = false;
 
   if (serializedParams && mqttConnected && mqttClient) {
+    if (!hasBoardCredentials()) {
+      if (connStatusEl) connStatusEl.textContent = 'Completa usuario y contraseña de la placa para guardar por MQTT';
+    } else {
     try {
       const topic = configTopic();
       if (!topic) throw new Error('Falta deviceId para enviar config por MQTT');
@@ -950,6 +958,7 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
       return true;
     } catch (mqttErr) {
       console.warn('Fallo envio por MQTT, intento HTTP:', mqttErr);
+    }
     }
   }
 
@@ -1569,6 +1578,10 @@ async function sendCommand(device, action) {
   let mqttSent = false;
 
   if (mqttConnected && mqttClient) {
+    if (!hasBoardCredentials()) {
+      if (connStatusEl) connStatusEl.textContent = 'Completa usuario y contraseña de la placa';
+      return;
+    }
     const topic = commandTopic(device);
     try {
       if (!topic) throw new Error('Falta deviceId para comando MQTT');
@@ -1673,6 +1686,10 @@ function requestStatusSnapshot() {
   statusRequestInFlight = true;
 
   if (mqttConnected && mqttClient) {
+    if (!hasBoardCredentials()) {
+      statusRequestInFlight = false;
+      return;
+    }
     try {
       const topic = statusRequestTopic();
       if (!topic) {
