@@ -80,21 +80,42 @@ const isHttpsPage = window.location.protocol === 'https:';
 const PH_SAFE_MIN = 5.8;
 const PH_SAFE_MAX = 6.2;
 
+const queryParams = new URLSearchParams(window.location.search || '');
+
+function normalizeProfile(value) {
+  const profile = String(value || '').trim().toLowerCase();
+  return profile.replace(/[^a-z0-9_-]/g, '');
+}
+
+const storageProfile = normalizeProfile(queryParams.get('profile') || queryParams.get('deviceId') || 'default');
+
+function scopedStorageKey(key) {
+  return `hidroponia:${storageProfile}:${key}`;
+}
+
+function readScopedSetting(key, fallback = '') {
+  const scoped = window.localStorage.getItem(scopedStorageKey(key));
+  if (scoped !== null) return scoped;
+  const legacy = window.localStorage.getItem(key);
+  if (legacy !== null) return legacy;
+  return fallback;
+}
+
 let settings = {
-  espIp: localStorage.getItem('espIp') || '',
+  espIp: readScopedSetting('espIp', ''),
   mqttHost: FIXED_MQTT_HOST,
   mqttPort: FIXED_MQTT_PORT,
   mqttUser: FIXED_MQTT_USER,
   mqttPassword: FIXED_MQTT_PASSWORD,
-  appUser: localStorage.getItem('appUser') || '',
-  appPassword: localStorage.getItem('appPassword') || '',
-  deviceId: localStorage.getItem('deviceId') || '',
-  modoAuto: localStorage.getItem('modoAuto') === 'true',
-  epoca: localStorage.getItem('epoca') || 'primavera',
-  lightsStart: localStorage.getItem('lightsStart') || '',
-  lightsEnd: localStorage.getItem('lightsEnd') || '',
-  pumpOnMinutes: localStorage.getItem('pumpOnMinutes') || localStorage.getItem('pumpInterval') || '2',
-  pumpOffMinutes: localStorage.getItem('pumpOffMinutes') || '10'
+  appUser: readScopedSetting('appUser', ''),
+  appPassword: readScopedSetting('appPassword', ''),
+  deviceId: readScopedSetting('deviceId', ''),
+  modoAuto: readScopedSetting('modoAuto', 'false') === 'true',
+  epoca: readScopedSetting('epoca', 'primavera'),
+  lightsStart: readScopedSetting('lightsStart', ''),
+  lightsEnd: readScopedSetting('lightsEnd', ''),
+  pumpOnMinutes: readScopedSetting('pumpOnMinutes', readScopedSetting('pumpInterval', '2')),
+  pumpOffMinutes: readScopedSetting('pumpOffMinutes', '10')
 };
 
 function normalizeDeviceId(value) {
@@ -107,7 +128,6 @@ function normalizeDeviceId(value) {
 
 settings.deviceId = normalizeDeviceId(settings.deviceId);
 
-const queryParams = new URLSearchParams(window.location.search || '');
 if (queryParams.get('mqttHost')) settings.mqttHost = queryParams.get('mqttHost');
 if (queryParams.get('mqttPort')) settings.mqttPort = queryParams.get('mqttPort');
 if (queryParams.get('mqttUser')) settings.mqttUser = queryParams.get('mqttUser');
@@ -144,6 +164,24 @@ function enforceFixedMqttSettings() {
   if (!settings.mqttPort) settings.mqttPort = FIXED_MQTT_PORT;
   if (!settings.mqttUser) settings.mqttUser = FIXED_MQTT_USER;
   if (!settings.mqttPassword) settings.mqttPassword = FIXED_MQTT_PASSWORD;
+}
+
+function preserveProfileLinks() {
+  if (!storageProfile || storageProfile === 'default') return;
+
+  const links = Array.from(document.querySelectorAll('a.header-link[href]'));
+  for (const link of links) {
+    try {
+      const rawHref = link.getAttribute('href') || '';
+      if (!rawHref || rawHref.startsWith('#') || rawHref.startsWith('http')) continue;
+
+      const url = new URL(rawHref, window.location.href);
+      url.searchParams.set('profile', storageProfile);
+      link.setAttribute('href', `${url.pathname.split('/').pop() || rawHref}?${url.searchParams.toString()}`);
+    } catch (err) {
+      // ignora hrefs no parseables
+    }
+  }
 }
 
 function activeDeviceId() {
@@ -613,7 +651,8 @@ function scheduleStatusHttpFallback() {
 
 function safeStorageSet(storage, key, value) {
   try {
-    storage.setItem(key, value);
+    const storageKey = (storage === window.localStorage) ? scopedStorageKey(key) : key;
+    storage.setItem(storageKey, value);
   } catch (err) {
     console.warn(`No se pudo guardar ${key} en ${storage === window.sessionStorage ? 'sessionStorage' : 'localStorage'}:`, err);
   }
@@ -621,7 +660,7 @@ function safeStorageSet(storage, key, value) {
 
 function getBoardUserRegistry() {
   try {
-    const raw = window.localStorage.getItem('boardUserRegistry');
+    const raw = window.localStorage.getItem(scopedStorageKey('boardUserRegistry'));
     if (!raw) return {};
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' ? parsed : {};
@@ -1715,6 +1754,7 @@ async function automaticControl() {
 }
 
 applySettingsToUI();
+preserveProfileLinks();
 setActuatorStatePending();
 updateLastUpdateElapsed();
 
