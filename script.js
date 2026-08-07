@@ -70,6 +70,7 @@ const STATUS_POLL_INTERVAL_HIDDEN_MS = 5000;
 const STATUS_MIN_REQUEST_GAP_MS = 200;
 const TELEMETRY_FRESH_MS = 30000;
 const SERVER_TIME_SYNC_INTERVAL_MS = 15000;
+const COMMAND_ACK_TIMEOUT_MS = 3500;
 const FIXED_MQTT_HOST = 'af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud';
 const FIXED_MQTT_PORT = '8884';
 const FIXED_MQTT_USER = 'hidroweb';
@@ -123,6 +124,7 @@ let lastTelemetrySource = '--';
 let statusPollingTimer = null;
 let statusRequestInFlight = false;
 let lastStatusRequestAt = 0;
+let pendingCommandAckTimer = null;
 
 const autoLogic = window.AutoLogic;
 
@@ -522,6 +524,25 @@ function setActuatorStateUnavailable() {
     estadoBombaEl.textContent = 'SIN DATOS';
     setDeviceStateClass(estadoBombaEl, null);
   }
+}
+
+function clearPendingCommandAck() {
+  if (pendingCommandAckTimer) {
+    clearTimeout(pendingCommandAckTimer);
+    pendingCommandAckTimer = null;
+  }
+}
+
+function schedulePendingCommandAck() {
+  clearPendingCommandAck();
+  const sentAt = Date.now();
+  pendingCommandAckTimer = setTimeout(() => {
+    const hasFreshTelemetryAfterSend = lastTelemetryAt && lastTelemetryAt >= sentAt;
+    if (!hasFreshTelemetryAfterSend && connStatusEl) {
+      connStatusEl.textContent = 'Sin respuesta de la placa. Revisa ID, usuario y contraseña';
+    }
+    pendingCommandAckTimer = null;
+  }, COMMAND_ACK_TIMEOUT_MS);
 }
 
 async function initialStatusBootstrap() {
@@ -1081,6 +1102,22 @@ function normalizeBoolean(value) {
   return null;
 }
 
+function extractMqttActionValue(payload) {
+  if (payload === null || payload === undefined) return '';
+
+  const text = String(payload);
+  if (!text.includes('=')) {
+    return text;
+  }
+
+  try {
+    const params = new URLSearchParams(text);
+    return params.get('action') || text;
+  } catch (_) {
+    return text;
+  }
+}
+
 function setDeviceState(device, state) {
   const normalized = normalizeBoolean(state);
   if (normalized === null) return;
@@ -1281,12 +1318,14 @@ function onConnectSuccess() {
   const telemetry = mqttWildcardTopic('telemetry');
   const luzTopic = mqttWildcardTopic('commands/luz');
   const bombaTopic = mqttWildcardTopic('commands/bomba');
+  const authErrorTopic = mqttWildcardTopic('auth/error');
   const syncTopic = mqttWildcardTopic('ui/mode-schedule');
   mqttClient.subscribe('hidroponia/#');
   mqttClient.subscribe('#');
   mqttClient.subscribe(telemetry);
   mqttClient.subscribe(luzTopic);
   mqttClient.subscribe(bombaTopic);
+  mqttClient.subscribe(authErrorTopic);
   mqttClient.subscribe(syncTopic);
 
   requestStatusSnapshot();
@@ -1316,8 +1355,12 @@ function onMessageArrived(message) {
     const topicParts = String(topic || '').split('/');
     const topicDeviceId = extractDeviceIdFromTopic(topic);
 
+    if (activeDeviceId() && topicDeviceId && topicDeviceId !== activeDeviceId()) {
+      return;
+    }
+
     if (topicDeviceId) {
-      if (!activeDeviceId() || activeDeviceId() === topicDeviceId) {
+      if (!activeDeviceId()) {
         settings.deviceId = topicDeviceId;
         safeStorageSet(window.localStorage, 'deviceId', settings.deviceId);
         updateAuthUi();
@@ -1333,6 +1376,7 @@ function onMessageArrived(message) {
     }
 
     if (topicParts.length >= 3 && topicParts[2] === 'telemetry') {
+      clearPendingCommandAck();
       if (statusFallbackTimer) {
         clearTimeout(statusFallbackTimer);
         statusFallbackTimer = null;
@@ -1362,22 +1406,33 @@ function onMessageArrived(message) {
       return;
     }
 
+    if (topicParts.length >= 4 && topicParts[2] === 'auth' && topicParts[3] === 'error') {
+      clearPendingCommandAck();
+      if (connStatusEl) connStatusEl.textContent = 'Usuario o contraseña incorrectos para esta placa';
+      if (mqttStatusEl) mqttStatusEl.textContent = 'Comando rechazado por autenticación';
+      return;
+    }
+
     if (topicParts.length >= 4 && topicParts[2] === 'commands' && topicParts[3] === 'luz') {
-      const luzState = normalizeBoolean(payload);
+      clearPendingCommandAck();
+      const actionValue = extractMqttActionValue(payload);
+      const luzState = normalizeBoolean(actionValue);
       if (luzState !== null) {
         setDeviceStateFromTelemetry('luz', luzState);
       } else {
-        estadoLuzEl.textContent = payload.toUpperCase();
+        estadoLuzEl.textContent = actionValue.toUpperCase();
       }
       return;
     }
 
     if (topicParts.length >= 4 && topicParts[2] === 'commands' && topicParts[3] === 'bomba') {
-      const bombaState = normalizeBoolean(payload);
+      clearPendingCommandAck();
+      const actionValue = extractMqttActionValue(payload);
+      const bombaState = normalizeBoolean(actionValue);
       if (bombaState !== null) {
         setDeviceStateFromTelemetry('bomba', bombaState);
       } else {
-        estadoBombaEl.textContent = payload.toUpperCase();
+        estadoBombaEl.textContent = actionValue.toUpperCase();
       }
       return;
     }
@@ -1430,8 +1485,9 @@ async function sendCommand(device, action) {
       mqttClient.send(topic, mqttCommandPayload.toString());
       mqttSent = true;
       mqttStatusEl.textContent = `Comando enviado: ${device} ${normalizedAction}`;
-      connStatusEl.textContent = 'Comando enviado por MQTT';
-      setDeviceState(device, shouldTurnOn);
+      connStatusEl.textContent = 'Comando enviado por MQTT, esperando respuesta...';
+      schedulePendingCommandAck();
+      requestStatusSnapshot();
     } catch (err) {
       console.warn('Error enviando comando por MQTT:', err);
     }
