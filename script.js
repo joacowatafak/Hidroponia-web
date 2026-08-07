@@ -97,6 +97,16 @@ let settings = {
   pumpOffMinutes: localStorage.getItem('pumpOffMinutes') || '10'
 };
 
+function normalizeDeviceId(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (raw.startsWith('esp8266-')) return raw;
+  if (/^[0-9a-f]{6,8}$/i.test(raw)) return `esp8266-${raw}`;
+  return raw;
+}
+
+settings.deviceId = normalizeDeviceId(settings.deviceId);
+
 const queryParams = new URLSearchParams(window.location.search || '');
 if (queryParams.get('mqttHost')) settings.mqttHost = queryParams.get('mqttHost');
 if (queryParams.get('mqttPort')) settings.mqttPort = queryParams.get('mqttPort');
@@ -104,7 +114,7 @@ if (queryParams.get('mqttUser')) settings.mqttUser = queryParams.get('mqttUser')
 if (queryParams.get('mqttPassword')) settings.mqttPassword = queryParams.get('mqttPassword');
 if (queryParams.get('appUser')) settings.appUser = queryParams.get('appUser');
 if (queryParams.get('appPassword')) settings.appPassword = queryParams.get('appPassword');
-if (queryParams.get('deviceId')) settings.deviceId = queryParams.get('deviceId');
+if (queryParams.get('deviceId')) settings.deviceId = normalizeDeviceId(queryParams.get('deviceId'));
 
 let mqttClient = null;
 let mqttConnected = false;
@@ -125,6 +135,7 @@ let statusPollingTimer = null;
 let statusRequestInFlight = false;
 let lastStatusRequestAt = 0;
 let pendingCommandAckTimer = null;
+let telemetryWaitTimer = null;
 
 const autoLogic = window.AutoLogic;
 
@@ -136,7 +147,7 @@ function enforceFixedMqttSettings() {
 }
 
 function activeDeviceId() {
-  return (settings.deviceId || '').trim().toLowerCase();
+  return normalizeDeviceId(settings.deviceId);
 }
 
 function mqttTopic(suffix) {
@@ -533,6 +544,33 @@ function clearPendingCommandAck() {
   }
 }
 
+function clearTelemetryWaitTimer() {
+  if (telemetryWaitTimer) {
+    clearTimeout(telemetryWaitTimer);
+    telemetryWaitTimer = null;
+  }
+}
+
+function startTelemetryWaitTimer() {
+  clearTelemetryWaitTimer();
+  telemetryWaitTimer = setTimeout(() => {
+    const hasRecentTelemetry = isTelemetryFresh(12000);
+    if (hasRecentTelemetry) {
+      telemetryWaitTimer = null;
+      return;
+    }
+
+    if (authStatusEl) {
+      authStatusEl.dataset.userOverride = '1';
+      authStatusEl.textContent = 'Sin telemetria: revisa ID de placa, usuario/clave o si la placa esta online';
+    }
+    if (connStatusEl) {
+      connStatusEl.textContent = 'Sin telemetria MQTT de la placa seleccionada';
+    }
+    telemetryWaitTimer = null;
+  }, 7000);
+}
+
 function schedulePendingCommandAck() {
   clearPendingCommandAck();
   const sentAt = Date.now();
@@ -760,7 +798,7 @@ function syncSettingsFromInputs() {
   if (espIpEl) settings.espIp = espIpEl.value.trim();
   if (appUserEl) settings.appUser = appUserEl.value.trim();
   if (appPasswordEl) settings.appPassword = appPasswordEl.value.trim();
-  if (deviceIdInputEl) settings.deviceId = deviceIdInputEl.value.trim().toLowerCase();
+  if (deviceIdInputEl) settings.deviceId = normalizeDeviceId(deviceIdInputEl.value);
   if (modeSelectEl) {
     settings.modoAuto = modeSelectEl.value === 'auto';
   } else if (modeManualBtn && modeAutoBtn) {
@@ -777,7 +815,7 @@ function syncSettingsFromInputs() {
   safeStorageSet(window.localStorage, 'espIp', settings.espIp);
   safeStorageSet(window.localStorage, 'appUser', settings.appUser);
   safeStorageSet(window.localStorage, 'appPassword', settings.appPassword);
-  safeStorageSet(window.localStorage, 'deviceId', settings.deviceId);
+  safeStorageSet(window.localStorage, 'deviceId', normalizeDeviceId(settings.deviceId));
   safeStorageSet(window.localStorage, 'modoAuto', String(settings.modoAuto));
   safeStorageSet(window.localStorage, 'epoca', settings.epoca);
   safeStorageSet(window.localStorage, 'lightsStart', settings.lightsStart);
@@ -1302,6 +1340,8 @@ function disconnectBroker() {
   if (mqttClient && mqttClient.isConnected()) {
     mqttClient.disconnect();
   }
+  clearPendingCommandAck();
+  clearTelemetryWaitTimer();
   mqttConnected = false;
   if (mqttStatusEl) mqttStatusEl.textContent = 'Desconectado';
 }
@@ -1314,6 +1354,7 @@ function onConnectSuccess() {
     authStatusEl.dataset.userOverride = '1';
     authStatusEl.textContent = 'Esperando telemetría del tablero...';
   }
+  startTelemetryWaitTimer();
   updateConnectionIndicators();
   const telemetry = mqttWildcardTopic('telemetry');
   const luzTopic = mqttWildcardTopic('commands/luz');
@@ -1338,6 +1379,8 @@ function onConnectFailure(error) {
 }
 
 function onConnectionLost(responseObject) {
+  clearPendingCommandAck();
+  clearTelemetryWaitTimer();
   mqttConnected = false;
   if (mqttStatusEl) mqttStatusEl.textContent = 'Se perdió la conexión';
   if (connStatusEl) connStatusEl.textContent = 'Sin conexión';
@@ -1377,6 +1420,7 @@ function onMessageArrived(message) {
 
     if (topicParts.length >= 3 && topicParts[2] === 'telemetry') {
       clearPendingCommandAck();
+      clearTelemetryWaitTimer();
       if (statusFallbackTimer) {
         clearTimeout(statusFallbackTimer);
         statusFallbackTimer = null;
@@ -1408,8 +1452,13 @@ function onMessageArrived(message) {
 
     if (topicParts.length >= 4 && topicParts[2] === 'auth' && topicParts[3] === 'error') {
       clearPendingCommandAck();
+      clearTelemetryWaitTimer();
       if (connStatusEl) connStatusEl.textContent = 'Usuario o contraseña incorrectos para esta placa';
       if (mqttStatusEl) mqttStatusEl.textContent = 'Comando rechazado por autenticación';
+      if (authStatusEl) {
+        authStatusEl.dataset.userOverride = '1';
+        authStatusEl.textContent = 'Credenciales incorrectas para la placa seleccionada';
+      }
       return;
     }
 
@@ -1473,6 +1522,11 @@ async function sendCommand(device, action) {
   const shouldTurnOn = normalizedAction === 'ON';
   const base = baseUrl();
 
+  if (!activeDeviceId()) {
+    if (connStatusEl) connStatusEl.textContent = 'Falta ID de placa (ej: esp8266-c64e0a)';
+    return;
+  }
+
   let mqttSent = false;
 
   if (mqttConnected && mqttClient) {
@@ -1494,7 +1548,9 @@ async function sendCommand(device, action) {
   }
 
   if (!base && !mqttSent) {
-    connStatusEl.textContent = 'IP ESP no configurada';
+    connStatusEl.textContent = mqttConnected
+      ? 'Comando no enviado. Revisa ID/credenciales de la placa'
+      : 'Sin MQTT conectado e IP ESP no configurada';
     return;
   }
 
