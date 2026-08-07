@@ -47,6 +47,8 @@ const disconnectBrokerBtn = document.getElementById('disconnectBroker');
 const mqttStatusEl = document.getElementById('mqttStatus');
 const appUserEl = document.getElementById('appUser');
 const appPasswordEl = document.getElementById('appPassword');
+const deviceIdInputEl = document.getElementById('deviceId');
+const createBoardUserBtn = document.getElementById('createBoardUser');
 const loginBoardBtn = document.getElementById('loginBoard');
 const authStatusEl = document.getElementById('authStatus');
 const deviceIdDisplayEl = document.getElementById('deviceIdDisplay');
@@ -62,11 +64,11 @@ const summaryLuzStateEl = document.getElementById('summaryLuzState');
 const summaryBombaStateEl = document.getElementById('summaryBombaState');
 const manualControlButtons = [luzOnBtn, luzOffBtn, bombaOnBtn, bombaOffBtn].filter(Boolean);
 const autoConfigActionButtons = [saveParamsBtn, clearParamsBtn].filter(Boolean);
-const STATUS_REQUEST_FALLBACK_MS = 1800;
-const STATUS_POLL_INTERVAL_ACTIVE_MS = 4000;
-const STATUS_POLL_INTERVAL_HIDDEN_MS = 15000;
-const STATUS_MIN_REQUEST_GAP_MS = 1500;
-const TELEMETRY_FRESH_MS = 9000;
+const STATUS_REQUEST_FALLBACK_MS = 800;
+const STATUS_POLL_INTERVAL_ACTIVE_MS = 1000;
+const STATUS_POLL_INTERVAL_HIDDEN_MS = 5000;
+const STATUS_MIN_REQUEST_GAP_MS = 200;
+const TELEMETRY_FRESH_MS = 30000;
 const SERVER_TIME_SYNC_INTERVAL_MS = 15000;
 const FIXED_MQTT_HOST = 'af728765e4064e5780c59ff3b8cb9509.s1.eu.hivemq.cloud';
 const FIXED_MQTT_PORT = '8884';
@@ -94,6 +96,15 @@ let settings = {
   pumpOffMinutes: localStorage.getItem('pumpOffMinutes') || '10'
 };
 
+const queryParams = new URLSearchParams(window.location.search || '');
+if (queryParams.get('mqttHost')) settings.mqttHost = queryParams.get('mqttHost');
+if (queryParams.get('mqttPort')) settings.mqttPort = queryParams.get('mqttPort');
+if (queryParams.get('mqttUser')) settings.mqttUser = queryParams.get('mqttUser');
+if (queryParams.get('mqttPassword')) settings.mqttPassword = queryParams.get('mqttPassword');
+if (queryParams.get('appUser')) settings.appUser = queryParams.get('appUser');
+if (queryParams.get('appPassword')) settings.appPassword = queryParams.get('appPassword');
+if (queryParams.get('deviceId')) settings.deviceId = queryParams.get('deviceId');
+
 let mqttClient = null;
 let mqttConnected = false;
 let lastTelemetry = null;
@@ -116,10 +127,10 @@ let lastStatusRequestAt = 0;
 const autoLogic = window.AutoLogic;
 
 function enforceFixedMqttSettings() {
-  settings.mqttHost = FIXED_MQTT_HOST;
-  settings.mqttPort = FIXED_MQTT_PORT;
-  settings.mqttUser = FIXED_MQTT_USER;
-  settings.mqttPassword = FIXED_MQTT_PASSWORD;
+  if (!settings.mqttHost) settings.mqttHost = FIXED_MQTT_HOST;
+  if (!settings.mqttPort) settings.mqttPort = FIXED_MQTT_PORT;
+  if (!settings.mqttUser) settings.mqttUser = FIXED_MQTT_USER;
+  if (!settings.mqttPassword) settings.mqttPassword = FIXED_MQTT_PASSWORD;
 }
 
 function activeDeviceId() {
@@ -130,6 +141,19 @@ function mqttTopic(suffix) {
   const deviceId = activeDeviceId();
   if (!deviceId) return null;
   return `hidroponia/${deviceId}/${suffix}`;
+}
+
+function mqttWildcardTopic(suffix) {
+  return `hidroponia/+/${suffix}`;
+}
+
+function extractDeviceIdFromTopic(topic) {
+  if (typeof topic !== 'string') return null;
+  const parts = topic.split('/');
+  if (parts.length >= 2 && parts[0] === 'hidroponia' && parts[1]) {
+    return String(parts[1]).toLowerCase();
+  }
+  return null;
 }
 
 function modeScheduleTopic() {
@@ -283,11 +307,12 @@ function updateAutoConfigSummary() {
 function updateAuthUi() {
   if (appUserEl) appUserEl.value = settings.appUser;
   if (appPasswordEl) appPasswordEl.value = settings.appPassword;
+  if (deviceIdInputEl) deviceIdInputEl.value = settings.deviceId;
   if (deviceIdDisplayEl) deviceIdDisplayEl.textContent = activeDeviceId() || '--';
 
-  if (authStatusEl) {
+  if (authStatusEl && !authStatusEl.dataset.userOverride) {
     authStatusEl.textContent = activeDeviceId()
-      ? `Autenticado para placa ${activeDeviceId()}`
+      ? `Placa registrada: ${activeDeviceId()}`
       : 'Sin autenticar';
   }
 }
@@ -313,6 +338,34 @@ function scheduleStatusPolling() {
   }, currentStatusPollIntervalMs());
 }
 
+async function discoverBoardFromEsp() {
+  const base = getBaseUrl();
+  if (!base) {
+    if (authStatusEl) authStatusEl.textContent = 'Ingresa la IP de la placa';
+    return false;
+  }
+
+  const url = withAuthUrl(`${base}/auth/login`);
+
+  try {
+    const response = await fetch(url, { method: 'GET' });
+    const data = await response.json();
+
+    if (response.ok && data?.ok && data?.deviceId) {
+      settings.deviceId = String(data.deviceId).trim().toLowerCase();
+      safeStorageSet(window.localStorage, 'deviceId', settings.deviceId);
+      updateAuthUi();
+      if (authStatusEl) authStatusEl.textContent = `Placa encontrada: ${settings.deviceId}`;
+      if (connStatusEl) connStatusEl.textContent = 'Placa encontrada por HTTP';
+      return true;
+    }
+  } catch (error) {
+    console.warn('No se pudo contactar a la placa por HTTP:', error);
+  }
+
+  return false;
+}
+
 async function loginBoardAccount() {
   syncSettingsFromInputs();
 
@@ -321,73 +374,132 @@ async function loginBoardAccount() {
     return;
   }
 
-  if (authStatusEl) authStatusEl.textContent = 'Buscando placa...';
-
-  const authCandidates = [];
-  const currentOrigin = window.location.origin;
-  const currentHost = window.location.hostname;
-
-  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
-    authCandidates.push(`${currentOrigin}/auth/login`);
+  const candidates = getEspBaseCandidates();
+  if (!candidates.length && !activeDeviceId()) {
+    if (authStatusEl) authStatusEl.textContent = 'Ingresa IP local o ID de placa para vincular';
+    return;
   }
 
-  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
-    authCandidates.push(`http://${currentHost}/auth/login`);
-  }
+  if (authStatusEl) authStatusEl.textContent = 'Verificando usuario contra la placa...';
+  let authenticated = false;
+  let authError = null;
 
-  if (settings.espIp) {
-    const normalized = String(settings.espIp).trim();
-    if (normalized.startsWith('http')) {
-      authCandidates.push(`${normalized.replace(/\/$/, '')}/auth/login`);
-    } else {
-      authCandidates.push(`http://${normalized}/auth/login`);
-    }
-  }
-
-  authCandidates.push('http://esp8266.local/auth/login');
-  authCandidates.push('http://hidro-control.local/auth/login');
-
-  const uniqueCandidates = [...new Set(authCandidates.filter(Boolean))];
-
-  for (const target of uniqueCandidates) {
+  for (const base of candidates) {
     try {
-      const body = new URLSearchParams({ user: settings.appUser, pass: settings.appPassword });
-      const res = await fetch(target, {
+      const body = new URLSearchParams({
+        user: settings.appUser,
+        pass: settings.appPassword
+      });
+
+      const response = await fetch(`${base}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body.toString(),
         cache: 'no-store'
       });
 
-      if (!res.ok) {
-        continue;
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.ok || !data?.deviceId) {
+        throw new Error(data?.message || `HTTP ${response.status}`);
       }
 
-      const data = await res.json();
-      if (!data?.ok || !data?.deviceId) {
-        continue;
+      const detectedDeviceId = String(data.deviceId).trim().toLowerCase();
+      const normalizedUser = String(settings.appUser || '').trim().toLowerCase();
+      const registry = getBoardUserRegistry();
+      const registeredDeviceId = registry[normalizedUser];
+
+      if (registeredDeviceId && registeredDeviceId !== detectedDeviceId) {
+        throw new Error(`El usuario ${normalizedUser} ya esta vinculado a la placa ${registeredDeviceId}`);
       }
 
-      settings.deviceId = String(data.deviceId).toLowerCase();
+      registry[normalizedUser] = detectedDeviceId;
+      saveBoardUserRegistry(registry);
+
+      settings.deviceId = detectedDeviceId;
       safeStorageSet(window.localStorage, 'deviceId', settings.deviceId);
       updateAuthUi();
-
-      if (authStatusEl) authStatusEl.textContent = `Acceso OK a placa ${settings.deviceId}`;
-
-      if (mqttClient && mqttClient.isConnected()) {
-        disconnectBroker();
-        connectToBroker();
-      }
-
-      requestStatusSnapshot();
-      return;
-    } catch (err) {
-      // Intenta con la siguiente URL
+      if (authStatusEl) authStatusEl.textContent = `Usuario validado en placa: ${settings.deviceId}`;
+      if (connStatusEl) connStatusEl.textContent = 'Autenticado por HTTP con ESP';
+      authenticated = true;
+      break;
+    } catch (error) {
+      authError = error;
+      console.warn(`Fallo autenticacion HTTP en ${base}:`, error);
     }
   }
 
-  if (authStatusEl) authStatusEl.textContent = 'No se encontró la placa en la red';
-  console.warn('No se pudo autenticar placa con ninguna URL candidata');
+  if (!authenticated) {
+    if (!activeDeviceId()) {
+      if (authStatusEl) authStatusEl.textContent = `No coincide usuario/clave con el ESP (${authError?.message || 'sin respuesta'})`;
+      return;
+    }
+    if (authStatusEl) authStatusEl.textContent = `Sin acceso HTTP. Vinculando por MQTT con ID ${activeDeviceId()}...`;
+  }
+
+  if (!window.Paho) {
+    if (authStatusEl) authStatusEl.textContent = 'La librería MQTT no está cargada';
+    return;
+  }
+
+  if (authStatusEl) authStatusEl.textContent = 'Conectando por MQTT...';
+  connectToBroker();
+}
+
+async function createBoardUserAccount() {
+  syncSettingsFromInputs();
+
+  if (!settings.appUser || !settings.appPassword) {
+    if (authStatusEl) authStatusEl.textContent = 'Completa usuario y contraseña para crear el usuario';
+    return;
+  }
+
+  const candidates = getEspBaseCandidates();
+  if (!candidates.length) {
+    if (authStatusEl) authStatusEl.textContent = 'Ingresa la IP del ESP8266';
+    return;
+  }
+
+  if (authStatusEl) authStatusEl.textContent = 'Creando usuario en la placa...';
+
+  let setupError = null;
+  for (const base of candidates) {
+    try {
+      const body = new URLSearchParams({
+        user: settings.appUser,
+        pass: settings.appPassword
+      });
+
+      const response = await fetch(`${base}/auth/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+        cache: 'no-store'
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.ok || !data?.deviceId) {
+        throw new Error(data?.message || `HTTP ${response.status}`);
+      }
+
+      settings.deviceId = String(data.deviceId).trim().toLowerCase();
+      safeStorageSet(window.localStorage, 'deviceId', settings.deviceId);
+
+      const normalizedUser = String(settings.appUser || '').trim().toLowerCase();
+      const registry = getBoardUserRegistry();
+      registry[normalizedUser] = settings.deviceId;
+      saveBoardUserRegistry(registry);
+
+      updateAuthUi();
+      if (authStatusEl) authStatusEl.textContent = `Usuario creado en placa: ${settings.deviceId}`;
+      if (connStatusEl) connStatusEl.textContent = 'Usuario creado en ESP';
+      return;
+    } catch (error) {
+      setupError = error;
+      console.warn(`No se pudo crear usuario en ${base}:`, error);
+    }
+  }
+
+  if (authStatusEl) authStatusEl.textContent = `No se pudo crear usuario (${setupError?.message || 'sin respuesta'})`;
 }
 
 function setActuatorStatePending() {
@@ -414,17 +526,6 @@ function setActuatorStateUnavailable() {
 
 async function initialStatusBootstrap() {
   setActuatorStatePending();
-
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const data = await fetchStatus(true);
-    if (data) {
-      return;
-    }
-    if (attempt < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, 1200));
-    }
-  }
 
   if (settings.mqttHost) {
     requestStatusSnapshot();
@@ -459,6 +560,21 @@ function safeStorageSet(storage, key, value) {
   }
 }
 
+function getBoardUserRegistry() {
+  try {
+    const raw = window.localStorage.getItem('boardUserRegistry');
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (err) {
+    console.warn('No se pudo leer boardUserRegistry:', err);
+    return {};
+  }
+}
+
+function saveBoardUserRegistry(registry) {
+  safeStorageSet(window.localStorage, 'boardUserRegistry', JSON.stringify(registry || {}));
+}
 function showActionFeedback(message, type = 'success') {
   if (!message) return;
 
@@ -623,6 +739,7 @@ function syncSettingsFromInputs() {
   if (espIpEl) settings.espIp = espIpEl.value.trim();
   if (appUserEl) settings.appUser = appUserEl.value.trim();
   if (appPasswordEl) settings.appPassword = appPasswordEl.value.trim();
+  if (deviceIdInputEl) settings.deviceId = deviceIdInputEl.value.trim().toLowerCase();
   if (modeSelectEl) {
     settings.modoAuto = modeSelectEl.value === 'auto';
   } else if (modeManualBtn && modeAutoBtn) {
@@ -639,6 +756,7 @@ function syncSettingsFromInputs() {
   safeStorageSet(window.localStorage, 'espIp', settings.espIp);
   safeStorageSet(window.localStorage, 'appUser', settings.appUser);
   safeStorageSet(window.localStorage, 'appPassword', settings.appPassword);
+  safeStorageSet(window.localStorage, 'deviceId', settings.deviceId);
   safeStorageSet(window.localStorage, 'modoAuto', String(settings.modoAuto));
   safeStorageSet(window.localStorage, 'epoca', settings.epoca);
   safeStorageSet(window.localStorage, 'lightsStart', settings.lightsStart);
@@ -763,6 +881,9 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
       });
 
       if (!res.ok) {
+        if (res.status === 401) {
+          throw new Error('Credenciales de placa incorrectas');
+        }
         throw new Error(`HTTP ${res.status}`);
       }
 
@@ -786,6 +907,9 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
         });
 
         if (!fallbackRes.ok) {
+          if (fallbackRes.status === 401) {
+            throw new Error('Credenciales de placa incorrectas');
+          }
           throw new Error(`HTTP ${fallbackRes.status}`);
         }
 
@@ -807,6 +931,9 @@ async function sendSettingsToEsp(includeAutomationSettings = true, resetAuto = f
   }
 
   if (connStatusEl) connStatusEl.textContent = 'No se pudo enviar la configuración al ESP (revisa IP/red)';
+  if (lastError && /Credenciales de placa incorrectas/i.test(String(lastError.message || ''))) {
+    if (connStatusEl) connStatusEl.textContent = 'Usuario o contraseña de la placa incorrectos';
+  }
   console.warn('Error enviando configuración al ESP:', lastError);
   return mqttDispatched;
 }
@@ -877,14 +1004,6 @@ function getEspBaseCandidates() {
   const currentOrigin = window.location.origin;
   const currentHost = window.location.hostname;
 
-  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
-    candidates.push(currentOrigin);
-  }
-
-  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
-    candidates.push(`http://${currentHost}`);
-  }
-
   if (settings.espIp) {
     const normalized = String(settings.espIp).trim();
     if (normalized.startsWith('http')) {
@@ -892,6 +1011,14 @@ function getEspBaseCandidates() {
     } else {
       candidates.push(`http://${normalized}`);
     }
+  }
+
+  if (!isGithubHosted && currentOrigin && currentOrigin !== 'null') {
+    candidates.push(currentOrigin);
+  }
+
+  if (!isGithubHosted && currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1' && currentHost !== '0.0.0.0') {
+    candidates.push(`http://${currentHost}`);
   }
 
   candidates.push('http://esp8266.local');
@@ -976,6 +1103,26 @@ function setDeviceState(device, state) {
   updateAutoConfigSummary();
 }
 
+function setDeviceStateFromTelemetry(device, state) {
+  const normalized = normalizeBoolean(state);
+  if (normalized === null) return;
+
+  if (device === 'luz') {
+    currentLuzState = normalized;
+    if (estadoLuzEl) {
+      estadoLuzEl.textContent = normalized ? 'ON' : 'OFF';
+      setDeviceStateClass(estadoLuzEl, normalized);
+    }
+    return;
+  }
+
+  currentBombaState = normalized;
+  if (estadoBombaEl) {
+    estadoBombaEl.textContent = normalized ? 'ON' : 'OFF';
+    setDeviceStateClass(estadoBombaEl, normalized);
+  }
+}
+
 function applyLastKnownActuatorState() {
   const luzFromTelemetry = normalizeBoolean(lastTelemetry?.luz);
   const bombaFromTelemetry = normalizeBoolean(lastTelemetry?.bomba);
@@ -998,7 +1145,7 @@ function applyActuatorStatesFromPayload(data) {
   if (data.luz !== undefined) {
     const luzState = normalizeBoolean(data.luz);
     if (luzState !== null) {
-      setDeviceState('luz', luzState);
+      setDeviceStateFromTelemetry('luz', luzState);
     } else if (estadoLuzEl) {
       estadoLuzEl.textContent = String(data.luz).toUpperCase();
     }
@@ -1007,7 +1154,7 @@ function applyActuatorStatesFromPayload(data) {
   if (data.bomba !== undefined) {
     const bombaState = normalizeBoolean(data.bomba);
     if (bombaState !== null) {
-      setDeviceState('bomba', bombaState);
+      setDeviceStateFromTelemetry('bomba', bombaState);
     } else if (estadoBombaEl) {
       estadoBombaEl.textContent = String(data.bomba).toUpperCase();
     }
@@ -1078,11 +1225,6 @@ async function sendManualCommand(device, action) {
 function connectToBroker() {
   enforceFixedMqttSettings();
 
-  if (!activeDeviceId()) {
-    if (mqttStatusEl) mqttStatusEl.textContent = 'Primero autentica tu usuario de placa';
-    return;
-  }
-
   if (!settings.mqttHost) {
     if (mqttStatusEl) mqttStatusEl.textContent = 'Ingresa el broker MQTT';
     return;
@@ -1131,21 +1273,22 @@ function onConnectSuccess() {
   mqttConnected = true;
   if (mqttStatusEl) mqttStatusEl.textContent = 'Conectado al broker';
   if (connStatusEl) connStatusEl.textContent = 'Conectado por MQTT';
-  updateConnectionIndicators();
-  const telemetry = telemetryTopic();
-  const luzTopic = commandTopic('luz');
-  const bombaTopic = commandTopic('bomba');
-  const syncTopic = modeScheduleTopic();
-  if (!telemetry || !luzTopic || !bombaTopic || !syncTopic) {
-    if (mqttStatusEl) mqttStatusEl.textContent = 'Falta autenticar placa para subscribir';
-    return;
+  if (authStatusEl) {
+    authStatusEl.dataset.userOverride = '1';
+    authStatusEl.textContent = 'Esperando telemetría del tablero...';
   }
+  updateConnectionIndicators();
+  const telemetry = mqttWildcardTopic('telemetry');
+  const luzTopic = mqttWildcardTopic('commands/luz');
+  const bombaTopic = mqttWildcardTopic('commands/bomba');
+  const syncTopic = mqttWildcardTopic('ui/mode-schedule');
+  mqttClient.subscribe('hidroponia/#');
+  mqttClient.subscribe('#');
   mqttClient.subscribe(telemetry);
   mqttClient.subscribe(luzTopic);
   mqttClient.subscribe(bombaTopic);
   mqttClient.subscribe(syncTopic);
 
-  // Solicita estado inmediato al ESP para refrescar ON/OFF y horarios al abrir.
   requestStatusSnapshot();
 }
 
@@ -1169,13 +1312,27 @@ function onMessageArrived(message) {
   try {
     const payload = message.payloadString;
     const topic = message.destinationName;
+    console.log('[MQTT]', topic, payload);
+    const topicParts = String(topic || '').split('/');
+    const topicDeviceId = extractDeviceIdFromTopic(topic);
 
-    const telemetry = telemetryTopic();
-    const luzTopic = commandTopic('luz');
-    const bombaTopic = commandTopic('bomba');
-    const syncTopic = modeScheduleTopic();
+    if (topicDeviceId) {
+      if (!activeDeviceId() || activeDeviceId() === topicDeviceId) {
+        settings.deviceId = topicDeviceId;
+        safeStorageSet(window.localStorage, 'deviceId', settings.deviceId);
+        updateAuthUi();
+        if (authStatusEl) {
+          authStatusEl.dataset.userOverride = '1';
+          authStatusEl.textContent = `Placa detectada: ${settings.deviceId}`;
+        }
+      }
+    }
 
-    if (telemetry && topic === telemetry) {
+    if (topicParts[0] !== 'hidroponia') {
+      return;
+    }
+
+    if (topicParts.length >= 3 && topicParts[2] === 'telemetry') {
       if (statusFallbackTimer) {
         clearTimeout(statusFallbackTimer);
         statusFallbackTimer = null;
@@ -1197,29 +1354,35 @@ function onMessageArrived(message) {
       applyActuatorStatesFromPayload(data);
       if (mqttStatusEl) mqttStatusEl.textContent = 'Datos recibidos del broker';
       if (connStatusEl) connStatusEl.textContent = 'Conectado por MQTT';
+      if (authStatusEl) {
+        authStatusEl.dataset.userOverride = '1';
+        authStatusEl.textContent = 'Datos actualizados';
+      }
       updateLastUpdateElapsed();
       return;
     }
 
-    if (luzTopic && topic === luzTopic) {
+    if (topicParts.length >= 4 && topicParts[2] === 'commands' && topicParts[3] === 'luz') {
       const luzState = normalizeBoolean(payload);
       if (luzState !== null) {
-        setDeviceState('luz', luzState);
+        setDeviceStateFromTelemetry('luz', luzState);
       } else {
         estadoLuzEl.textContent = payload.toUpperCase();
       }
+      return;
     }
 
-    if (bombaTopic && topic === bombaTopic) {
+    if (topicParts.length >= 4 && topicParts[2] === 'commands' && topicParts[3] === 'bomba') {
       const bombaState = normalizeBoolean(payload);
       if (bombaState !== null) {
-        setDeviceState('bomba', bombaState);
+        setDeviceStateFromTelemetry('bomba', bombaState);
       } else {
         estadoBombaEl.textContent = payload.toUpperCase();
       }
+      return;
     }
 
-    if (syncTopic && topic === syncTopic) {
+    if (topicParts.length >= 3 && topicParts[2] === 'ui' && topicParts[3] === 'mode-schedule') {
       const syncPayload = JSON.parse(payload);
       if (syncPayload?.type !== 'mode-schedule-updated' || syncPayload?.source === settingsSyncId) {
         return;
@@ -1261,7 +1424,10 @@ async function sendCommand(device, action) {
     const topic = commandTopic(device);
     try {
       if (!topic) throw new Error('Falta deviceId para comando MQTT');
-      mqttClient.send(topic, normalizedAction);
+      const mqttCommandPayload = new URLSearchParams({ action: normalizedAction });
+      if (settings.appUser) mqttCommandPayload.set('user', settings.appUser);
+      if (settings.appPassword) mqttCommandPayload.set('pass', settings.appPassword);
+      mqttClient.send(topic, mqttCommandPayload.toString());
       mqttSent = true;
       mqttStatusEl.textContent = `Comando enviado: ${device} ${normalizedAction}`;
       connStatusEl.textContent = 'Comando enviado por MQTT';
@@ -1283,7 +1449,10 @@ async function sendCommand(device, action) {
   const url = withAuthUrl(`${base}/${device}/${normalizedAction.toLowerCase()}`);
   try {
     const res = await fetch(url, { method: 'GET' });
-    if (!res.ok) throw new Error('error en petición');
+    if (!res.ok) {
+      if (res.status === 401) throw new Error('auth');
+      throw new Error('error en petición');
+    }
     connStatusEl.textContent = mqttSent
       ? `OK local: ${device} ${normalizedAction.toLowerCase()}`
       : `OK: ${device} ${normalizedAction.toLowerCase()}`;
@@ -1291,35 +1460,33 @@ async function sendCommand(device, action) {
     await fetchStatus();
   } catch (err) {
     if (!mqttSent) {
-      connStatusEl.textContent = 'Error conectando al ESP';
+      connStatusEl.textContent = (String(err?.message || '') === 'auth')
+        ? 'Usuario o contraseña de la placa incorrectos'
+        : 'Error conectando al ESP';
     }
   }
 }
 
 if (luzOnBtn) {
   luzOnBtn.addEventListener('click', () => {
-    if (estadoLuzEl) estadoLuzEl.textContent = 'ON';
     void sendManualCommand('luz', 'on');
   });
 }
 
 if (luzOffBtn) {
   luzOffBtn.addEventListener('click', () => {
-    if (estadoLuzEl) estadoLuzEl.textContent = 'OFF';
     void sendManualCommand('luz', 'off');
   });
 }
 
 if (bombaOnBtn) {
   bombaOnBtn.addEventListener('click', () => {
-    if (estadoBombaEl) estadoBombaEl.textContent = 'ON';
     void sendManualCommand('bomba', 'on');
   });
 }
 
 if (bombaOffBtn) {
   bombaOffBtn.addEventListener('click', () => {
-    if (estadoBombaEl) estadoBombaEl.textContent = 'OFF';
     void sendManualCommand('bomba', 'off');
   });
 }
@@ -1334,66 +1501,14 @@ async function fetchStatus(forceHttp = false) {
     }
   }
 
-  const statusCandidates = getStatusUrlCandidates();
-  if (statusCandidates.length === 0) return null;
-
-  let lastError = null;
-
-  for (const url of statusCandidates) {
-    try {
-      const res = await fetch(withAuthUrl(url), { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const data = await res.json();
-      if (!data || typeof data !== 'object') {
-        throw new Error('Respuesta de estado invalida');
-      }
-
-      lastTelemetry = data;
-      lastTelemetryAt = Date.now();
-      lastTelemetrySource = 'HTTP';
-
-      if (data.serverTime && serverTimeEl) {
-        serverTimeEl.textContent = data.serverTime;
-      }
-
-      applyAutoSettingsFromStatus(data);
-
-      if (tempEl) {
-        if (data.temp === null || data.temp === undefined) {
-          tempEl.textContent = 'Error de datos';
-        } else {
-          tempEl.textContent = `${data.temp}°C`;
-        }
-      }
-
-      if (humEl) {
-        if (data.hum === null || data.hum === undefined) {
-          humEl.textContent = 'Error de datos';
-        } else {
-          humEl.textContent = `${data.hum}%`;
-        }
-      }
-
-      updatePhDisplay(data.ph);
-
-      applyActuatorStatesFromPayload(data);
-      if (connStatusEl) connStatusEl.textContent = `Conectado (${data.serverTime || 'sin hora'})`;
-      statusRequestInFlight = false;
-      updateLastUpdateElapsed();
-      return data;
-    } catch (err) {
-      lastError = err;
-    }
+  if (connStatusEl) {
+    connStatusEl.textContent = 'Esperando datos por MQTT';
   }
-
-  if (connStatusEl) connStatusEl.textContent = 'No responde el ESP';
   if (tempEl) tempEl.textContent = 'Error de datos';
   if (humEl) humEl.textContent = 'Error de datos';
   updatePhDisplay(null);
   statusRequestInFlight = false;
   updateLastUpdateElapsed();
-  console.warn('No se pudo obtener estado del ESP:', lastError);
   return null;
 }
 
@@ -1409,18 +1524,22 @@ function requestStatusSnapshot() {
   if (mqttConnected && mqttClient) {
     try {
       const topic = statusRequestTopic();
-      if (!topic) throw new Error('Falta deviceId para pedir estado por MQTT');
-      mqttClient.send(topic, 'now');
-      scheduleStatusHttpFallback();
+      if (!topic) {
+        statusRequestInFlight = false;
+        if (connStatusEl) connStatusEl.textContent = 'Esperando descubrir la placa por MQTT';
+        return;
+      }
+      const statusPayload = new URLSearchParams({ request: 'now' });
+      if (settings.appUser) statusPayload.set('user', settings.appUser);
+      if (settings.appPassword) statusPayload.set('pass', settings.appPassword);
+      mqttClient.send(topic, statusPayload.toString());
       return;
     } catch (err) {
-      console.warn('No se pudo solicitar estado por MQTT, intento HTTP:', err);
+      console.warn('No se pudo solicitar estado por MQTT:', err);
     }
   }
 
-  void fetchStatus(true).finally(() => {
-    statusRequestInFlight = false;
-  });
+  statusRequestInFlight = false;
 }
 
 async function automaticControl() {
@@ -1519,6 +1638,12 @@ if (disconnectBrokerBtn) {
 if (loginBoardBtn) {
   loginBoardBtn.addEventListener('click', () => {
     void loginBoardAccount();
+  });
+}
+
+if (createBoardUserBtn) {
+  createBoardUserBtn.addEventListener('click', () => {
+    void createBoardUserAccount();
   });
 }
 
